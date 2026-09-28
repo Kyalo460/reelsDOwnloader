@@ -1,0 +1,126 @@
+// Prisma Schema for Instagram Reel Downloader
+// Run migrations with: npx prisma migrate dev
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ResolutionStatus {
+  PENDING
+  RESOLVED
+  FAILED
+  EXPIRED
+  PRIVATE
+  NOT_PERMITTED
+}
+
+model ReelResolution {
+  id            String    @id @default(cuid())
+  url           String    @unique
+  shortCode     String    @unique
+  title         String?
+  thumbnailUrl  String?
+  duration      Int?
+  status        ResolutionStatus @default(PENDING)
+  media         Json      // Array of MediaVariant objects
+  errorCode     String?
+  errorMessage  String?
+  ipHash        String
+  userId        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  expiresAt     DateTime
+  downloads     Download[]
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([shortCode])
+  @@index([createdAt])
+  @@index([status])
+  @@index([ipHash])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Download {
+  id              String   @id @default(cuid())
+  resolutionId    String
+  resolution      ReelResolution @relation(fields: [resolutionId], references: [id], onDelete: Cascade)
+  mediaQuality    String
+  mediaFormat     String
+  fileSize        BigInt?
+  ipHash          String
+  userId          String?
+  createdAt       DateTime @default(now())
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([resolutionId])
+  @@index([createdAt])
+  @@index([ipHash])
+  @@index([userId])
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  emailVerified DateTime?
+  name          String?
+  avatarUrl     String?
+  role          UserRole  @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  resolutions   ReelResolution[]
+  downloads     Download[]
+  sessions      Session[]
+
+  @@index([email])
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model AdminMetric {
+  id                      String   @id @default(cuid())
+  date                    DateTime @db.Date @unique
+  totalRequests           Int      @default(0)
+  successfulResolutions   Int      @default(0)
+  failedResolutions       Int      @default(0)
+  totalDownloads          Int      @default(0)
+  rateLimitEvents         Int      @default(0)
+  errors                  Int      @default(0)
+  avgLatencyMs            Float    @default(0)
+  storageUsedBytes        BigInt   @default(0)
+
+  @@index([date])
+}
+
+model RateLimitEntry {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  count     Int      @default(1)
+  windowStart DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([windowStart])
+  @@index([expiresAt])
+}
