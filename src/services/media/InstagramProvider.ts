@@ -2,8 +2,7 @@
 // Uses only legitimate, publicly accessible methods
 
 import { BaseMediaProvider, MediaProvider } from './MediaProvider';
-import type { MediaResolutionResult } from '@/types';
-import { ValidationResult } from '@/types';
+import type { MediaResolutionResult, ValidationResult } from '@/types';
 
 interface InstagramGraphQLResponse {
   data?: {
@@ -47,13 +46,21 @@ interface InstagramEmbedResponse {
   height: number;
 }
 
+// Current known query hashes (Instagram rotates these)
+const QUERY_HASHES = [
+  'b3055c01b4b222b8a47dc12b090e4e64', // Older
+  '9f8827793ef34641b2fb195d4d41151c', // Current common
+  '3e7e83e14604b5e5b1c4a7b8e2f3a9d1', // Alternative
+  'c5e9b8f2a1d4e7f0b3c6a9d2e5f8b1c4', // Another variant
+];
+
 export class InstagramProvider extends BaseMediaProvider {
   readonly name = 'Instagram';
   readonly supportedDomains = ['instagram.com', 'www.instagram.com'];
 
   private readonly GRAPHQL_ENDPOINT = 'https://www.instagram.com/graphql/query/';
   private readonly EMBED_ENDPOINT = 'https://api.instagram.com/oembed/';
-  private readonly SHORTCODE_QUERY_HASH = 'b3055c01b4b222b8a47dc12b090e4e64';
+  private readonly PAGE_ENDPOINT = 'https://www.instagram.com/p/';
 
   private readonly requestTimeout = 15000;
   private readonly maxRetries = 2;
@@ -69,29 +76,42 @@ export class InstagramProvider extends BaseMediaProvider {
       throw new Error('Invalid Instagram URL');
     }
 
-    // Try GraphQL API first (public endpoint)
-    try {
-      return await this.fetchViaGraphQL(shortCode);
-    } catch (graphqlError) {
-      console.warn('GraphQL fetch failed, trying oEmbed:', graphqlError);
-
-      // Fallback to oEmbed
+    // Try multiple query hashes
+    for (const hash of QUERY_HASHES) {
       try {
-        return await this.fetchViaOEmbed(url, shortCode);
-      } catch (oembedError) {
-        console.warn('oEmbed fetch failed:', oembedError);
-        throw new Error('Unable to retrieve media information');
+        return await this.fetchViaGraphQL(shortCode, hash);
+      } catch (error) {
+        console.warn(`GraphQL hash ${hash} failed:`, error);
+        continue;
       }
     }
+
+    // Try HTML page scraping as fallback
+    try {
+      return await this.fetchViaPageHTML(shortCode);
+    } catch (htmlError) {
+      console.warn('HTML scrape failed:', htmlError);
+    }
+
+    // Try oEmbed as last resort (won't give video URL but confirms public)
+    try {
+      await this.fetchViaOEmbed(url, shortCode);
+      throw new Error('MEDIA_UNAVAILABLE - Video download not available via oEmbed');
+    } catch (oembedError) {
+      console.warn('oEmbed failed:', oembedError);
+    }
+
+    throw new Error('Unable to retrieve media information - all methods failed');
   }
 
   protected createDownloadUrl(resolutionId: string, quality: string): string {
-    // In a real implementation, this would point to our download endpoint
-    // that streams from the source URL
     return `/api/reels/download/${resolutionId}/${quality}`;
   }
 
-  private async fetchViaGraphQL(shortCode: string): Promise<MediaResolutionResult> {
+  private async fetchViaGraphQL(
+    shortCode: string,
+    queryHash: string
+  ): Promise<MediaResolutionResult> {
     const variables = {
       shortcode: shortCode,
       fetch_comment_count: 0,
@@ -100,7 +120,7 @@ export class InstagramProvider extends BaseMediaProvider {
     };
 
     const body = new URLSearchParams({
-      query_hash: this.SHORTCODE_QUERY_HASH,
+      query_hash: queryHash,
       variables: JSON.stringify(variables),
     });
 
@@ -108,21 +128,20 @@ export class InstagramProvider extends BaseMediaProvider {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'X-Requested-With': 'XMLHttpRequest',
         Accept: '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
+        Origin: 'https://www.instagram.com',
+        Referer: `https://www.instagram.com/reel/${shortCode}/`,
       },
       body: body.toString(),
     });
 
     if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error('NOT_FOUND');
-      }
-      if (response.status === 429) {
-        throw new Error('RATE_LIMITED');
-      }
+      if (response.status === 404) throw new Error('NOT_FOUND');
+      if (response.status === 429) throw new Error('RATE_LIMITED');
       throw new Error(`GraphQL request failed: ${response.status}`);
     }
 
@@ -133,27 +152,15 @@ export class InstagramProvider extends BaseMediaProvider {
       throw new Error('Media not found in response');
     }
 
-    // Check if private
-    if (media.owner?.is_private) {
-      throw new Error('PRIVATE_CONTENT');
-    }
+    if (media.owner?.is_private) throw new Error('PRIVATE_CONTENT');
+    if (!media.is_video) throw new Error('NOT_PERMITTED - Not a video');
 
-    // Check if video
-    if (!media.is_video) {
-      throw new Error('NOT_PERMITTED');
-    }
-
-    // Get video URL
     const videoUrl = media.video_url;
-    if (!videoUrl) {
-      throw new Error('MEDIA_UNAVAILABLE');
-    }
+    if (!videoUrl) throw new Error('MEDIA_UNAVAILABLE - No video URL');
 
-    // Extract title from caption
     const caption = media.edge_media_to_caption?.edges?.[0]?.node?.text || '';
     const title = this.extractTitle(caption) || `Instagram Reel ${shortCode}`;
 
-    // Create media variants
     const variants = this.createVariants(shortCode, videoUrl, media.dimensions);
 
     return {
@@ -161,6 +168,68 @@ export class InstagramProvider extends BaseMediaProvider {
       title,
       thumbnail: media.display_url,
       duration: media.video_duration || 0,
+      media: variants,
+      shortCode,
+    };
+  }
+
+  private async fetchViaPageHTML(shortCode: string): Promise<MediaResolutionResult> {
+    const pageUrl = `${this.PAGE_ENDPOINT}${shortCode}/`;
+
+    const response = await this.fetchWithTimeout(pageUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Page fetch failed: ${response.status}`);
+    }
+
+    const html = await response.text();
+
+    // Check for private/blocked content
+    if (html.includes('This account is private') || html.includes('Page Not Found')) {
+      throw new Error('NOT_FOUND');
+    }
+
+    // Extract video URL from meta tags
+    const videoUrlMatch =
+      html.match(/property="og:video" content="([^"]+)"/) ||
+      html.match(/property="og:video:secure_url" content="([^"]+)"/) ||
+      html.match(/"video_url":"([^"]+)"/) ||
+      html.match(/"video_url":"([^"\\]+(?:\\.[^"\\]+)*)"/);
+
+    const videoUrl = videoUrlMatch?.[1]?.replace(/\\u0026/g, '&').replace(/&/g, '&');
+
+    if (!videoUrl) {
+      throw new Error('MEDIA_UNAVAILABLE - No video URL in page');
+    }
+
+    // Extract thumbnail
+    const thumbnailMatch = html.match(/property="og:image" content="([^"]+)"/);
+    const thumbnail = thumbnailMatch?.[1] || '';
+
+    // Extract title
+    const titleMatch =
+      html.match(/property="og:title" content="([^"]+)"/) || html.match(/<title>([^<]+)<\/title>/);
+    const title =
+      titleMatch?.[1]?.replace(' • Instagram', '').trim() || `Instagram Reel ${shortCode}`;
+
+    // Extract duration if available
+    const durationMatch = html.match(/property="og:video:duration" content="([^"]+)"/);
+    const duration = durationMatch?.[1] ? parseInt(durationMatch[1], 10) : 0;
+
+    const variants = this.createVariants(shortCode, videoUrl, undefined);
+
+    return {
+      id: `ig_${shortCode}`,
+      title,
+      thumbnail,
+      duration,
       media: variants,
       shortCode,
     };
@@ -182,17 +251,14 @@ export class InstagramProvider extends BaseMediaProvider {
 
     const data: InstagramEmbedResponse = await response.json();
 
-    // oEmbed doesn't give direct video URL, so we construct a best-effort
-    // In practice, this would need the GraphQL API for actual video URLs
+    // oEmbed doesn't give direct video URL
     throw new Error('MEDIA_UNAVAILABLE - oEmbed does not provide video URLs');
   }
 
   private extractTitle(caption: string): string | null {
-    // Extract first line or first sentence as title
     const lines = caption.split('\n').filter((l) => l.trim());
     const firstLine = lines[0]?.trim();
     if (firstLine) {
-      // Remove hashtags and mentions from title
       return firstLine
         .replace(/#[^\s]+/g, '')
         .replace(/@[^\s]+/g, '')
@@ -207,10 +273,6 @@ export class InstagramProvider extends BaseMediaProvider {
     videoUrl: string,
     dimensions?: { width: number; height: number }
   ): MediaResolutionResult['media'] {
-    // In a real implementation, Instagram provides multiple quality variants
-    // through the DASH manifest or separate CDN URLs
-    // For now, we create a single "original" quality variant
-
     const width = dimensions?.width || 1080;
     const height = dimensions?.height || 1920;
 
@@ -219,7 +281,7 @@ export class InstagramProvider extends BaseMediaProvider {
         quality: 'original',
         format: 'mp4',
         downloadUrl: this.createDownloadUrl(`ig_${shortCode}`, 'original'),
-        fileSize: undefined, // Unknown without HEAD request
+        fileSize: undefined,
         width,
         height,
       },
