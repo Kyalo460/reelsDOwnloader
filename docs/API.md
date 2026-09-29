@@ -61,6 +61,10 @@ Content-Type: application/json
 }
 ```
 
+> `media[]` lists the renditions that were actually located on the publicly
+> accessible Instagram page (direct URL processing). The direct media URL itself
+> is never returned - `downloadUrl` always points back at this API.
+
 **Error Responses:**
 
 | Status | Code                | Description                                    |
@@ -101,6 +105,12 @@ Stream download a resolved media file.
 
 - `resolutionId` - ID from resolve response
 - `quality` - Quality variant (`hd`, `sd`, `original`)
+
+The server streams the file from the direct media URL that was located on the
+public Instagram page. Requests may include a `Range` header; partial responses
+are passed through as `206` with `Content-Range`. If Instagram has since rejected
+the stored (signed) media URL, the response is `410 EXPIRED` and the reel should
+be resolved again.
 
 **Headers (Response):**
 

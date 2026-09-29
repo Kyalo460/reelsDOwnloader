@@ -1,22 +1,38 @@
 // Download Service - Handles streaming downloads
 
-import { MediaProvider, providerRegistry } from './MediaProvider';
+import { providerRegistry } from './MediaProvider';
 import { PrismaClient } from '@prisma/client';
 import { hashString } from '@/lib/utils';
 
 const prisma = new PrismaClient();
+
+type StoredResolution = NonNullable<Awaited<ReturnType<typeof prisma.reelResolution.findUnique>>>;
 
 export interface DownloadOptions {
   resolutionId: string;
   quality: string;
   ipAddress: string;
   userId?: string;
+  /** Optional `Range` header forwarded to the source for partial downloads. */
+  rangeHeader?: string;
 }
 
 export interface StreamResult {
   stream: ReadableStream;
   headers: Record<string, string>;
   fileName: string;
+  /** Upstream status: 200 for a full body, 206 for a partial (range) response. */
+  status: number;
+}
+
+/** The subset of a persisted media variant the download path cares about. */
+export interface StoredMediaVariant {
+  quality: string;
+  format: string;
+  /** Internal download endpoint handed to clients. Never a media source. */
+  downloadUrl?: string;
+  /** Direct media URL located on the public Instagram page. */
+  sourceUrl?: string;
 }
 
 export class DownloadService {
@@ -24,44 +40,52 @@ export class DownloadService {
   private readonly requestTimeout = 30000; // 30 seconds
 
   async prepareDownload(options: DownloadOptions): Promise<StreamResult> {
-    // Get resolution record
-    const resolution = await prisma.reelResolution.findUnique({
-      where: { id: options.resolutionId },
-    });
+    // Resolutions are addressed by the id returned from /api/reels/resolve.
+    // Rows persisted by the provider use the `ig_<shortcode>` id, so fall back
+    // to a shortcode lookup to stay compatible with earlier records.
+    const resolution = await this.findResolution(options.resolutionId);
 
     if (!resolution) {
       throw new Error('NOT_FOUND');
     }
 
-    if (resolution.status !== 'RESOLVED') {
+    if (resolution.status !== 'RESOLVED' || resolution.expiresAt < new Date()) {
       throw new Error('EXPIRED');
     }
 
-    // Find media variant
-    const mediaVariants = resolution.media as Array<{
-      quality: string;
-      format: string;
-      downloadUrl: string;
-    }>;
-
-    const variant = mediaVariants.find((v) => v.quality === options.quality);
+    const variants = resolution.media as unknown as StoredMediaVariant[];
+    const variant = variants.find((v) => v.quality === options.quality);
     if (!variant) {
       throw new Error('NOT_FOUND');
     }
 
-    // Get provider to fetch actual stream
-    const provider = providerRegistry.getProvider(resolution.url);
-    if (!provider) {
-      throw new Error('INTERNAL_ERROR');
+    // The direct media URL located on the public Instagram page is the actual
+    // source we stream from. Instagram signs those URLs, so a missing source
+    // means the client should resolve the reel again.
+    const sourceUrl = resolveSourceUrl(variant);
+    if (!sourceUrl) {
+      throw new Error('EXPIRED');
     }
 
-    // Stream from source
-    const sourceResponse = await this.fetchWithTimeout(variant.downloadUrl, {
-      headers: {
-        'User-Agent': 'ReelDownloader/1.0',
-        Accept: 'video/mp4,video/webm,*/*',
-      },
-    });
+    const provider = providerRegistry.getProvider(resolution.url);
+    const requestHeaders: Record<string, string> = {
+      ...(provider?.getMediaRequestHeaders(sourceUrl) ?? DEFAULT_MEDIA_HEADERS),
+    };
+
+    if (options.rangeHeader) {
+      requestHeaders.Range = options.rangeHeader;
+    }
+
+    const sourceResponse = await this.fetchWithTimeout(sourceUrl, { headers: requestHeaders });
+
+    // Signed CDN links expire or get revoked -> ask the client to re-resolve.
+    if (
+      sourceResponse.status === 401 ||
+      sourceResponse.status === 403 ||
+      sourceResponse.status === 410
+    ) {
+      throw new Error('EXPIRED');
+    }
 
     if (!sourceResponse.ok) {
       throw new Error('MEDIA_UNAVAILABLE');
@@ -75,7 +99,7 @@ export class DownloadService {
 
     // Check content length
     const contentLength = sourceResponse.headers.get('content-length');
-    if (contentLength && parseInt(contentLength) > this.maxFileSize) {
+    if (contentLength && parseInt(contentLength, 10) > this.maxFileSize) {
       throw new Error('FILE_TOO_LARGE');
     }
 
@@ -99,17 +123,32 @@ export class DownloadService {
       headers['Content-Length'] = contentLength;
     }
 
+    const contentRange = sourceResponse.headers.get('content-range');
+    if (contentRange) {
+      headers['Content-Range'] = contentRange;
+    }
+
     // Record download
     await this.recordDownload({
-      resolutionId: options.resolutionId,
+      resolutionId: resolution.id,
       quality: variant.quality,
       format: variant.format,
-      fileSize: contentLength ? parseInt(contentLength) : null,
+      fileSize: contentLength ? parseInt(contentLength, 10) : null,
       ipAddress: options.ipAddress,
       userId: options.userId,
     });
 
-    return { stream, headers, fileName };
+    return { stream, headers, fileName, status: sourceResponse.status };
+  }
+
+  private async findResolution(resolutionId: string): Promise<StoredResolution | null> {
+    const direct = await prisma.reelResolution.findUnique({ where: { id: resolutionId } });
+    if (direct) return direct;
+
+    const shortCode = shortCodeFromResolutionId(resolutionId);
+    if (!shortCode) return null;
+
+    return prisma.reelResolution.findUnique({ where: { shortCode } });
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -224,6 +263,40 @@ export class DownloadService {
 
     return { totalDownloads: total, byQuality };
   }
+}
+
+const DEFAULT_MEDIA_HEADERS: Record<string, string> = {
+  'User-Agent': 'ReelDownloader/1.0',
+  Accept: 'video/mp4,video/webm,*/*',
+};
+
+/**
+ * Only absolute, non-internal URLs are streamable sources. Rows written before
+ * direct URL processing (and the seeded fixtures) carry the relative API path
+ * only, which is not a media source.
+ */
+export function resolveSourceUrl(
+  variant: Pick<StoredMediaVariant, 'sourceUrl' | 'downloadUrl'>
+): string | null {
+  const candidate = variant.sourceUrl || variant.downloadUrl;
+  if (!candidate || !/^https?:\/\//i.test(candidate)) return null;
+  if (isInternalApiUrl(candidate)) return null;
+  return candidate;
+}
+
+/** True when the URL points back at this app's own API instead of the CDN. */
+export function isInternalApiUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.startsWith('/api/');
+  } catch {
+    return true;
+  }
+}
+
+/** `ig_ABC123` -> `ABC123`, so legacy provider ids still resolve. */
+export function shortCodeFromResolutionId(resolutionId: string): string | null {
+  const match = /^ig_([A-Za-z0-9_-]+)$/.exec(resolutionId);
+  return match?.[1] ?? null;
 }
 
 export const downloadService = new DownloadService();

@@ -48,6 +48,7 @@ export async function GET(
       resolutionId,
       quality,
       ipAddress,
+      rangeHeader: request.headers.get('range') ?? undefined,
     });
 
     const latencyMs = Date.now() - startTime;
@@ -57,13 +58,13 @@ export async function GET(
       ipHash,
       endpoint: `/api/reels/download/${resolutionId}/${quality}`,
       method: 'GET',
-      statusCode: 200,
+      statusCode: result.status,
       latencyMs,
     });
 
-    // Return streamed response
+    // Return streamed response (200, or 206 when a Range was requested)
     return new NextResponse(result.stream, {
-      status: 200,
+      status: result.status,
       headers: {
         ...result.headers,
         'X-RateLimit-Limit': rateLimitResult.limit.toString(),
@@ -93,7 +94,9 @@ export async function GET(
         return new NextResponse('Not found', { status: 404 });
       }
       if (message === 'EXPIRED') {
-        return new NextResponse('Download link expired', { status: 410 });
+        return new NextResponse('Download link expired, please resolve the reel again', {
+          status: 410,
+        });
       }
       if (message === 'FILE_TOO_LARGE') {
         return new NextResponse('File too large', { status: 413 });

@@ -51,11 +51,70 @@ interface MediaProvider {
 
   validateUrl(url: string): Promise<ValidationResult>;
   resolveMedia(url: string): Promise<MediaResolutionResult>;
-  getDownloadStream(mediaId: string): Promise<ReadableStream>;
+  getDownloadStream(mediaId: string, quality: string): Promise<Response>;
+  getMediaRequestHeaders(mediaUrl: string): Record<string, string>;
 }
 ```
 
 **InstagramProvider** implements this interface using only legitimate, publicly accessible methods.
+
+#### Direct URL Processing
+
+`InstagramProvider` resolves a pasted Reel URL with **direct URL processing**: it
+requests the publicly accessible Instagram page for that URL and locates the
+media URL inside the response. It does **not** use Meta's official Graph API
+(`graph.facebook.com`, `/{ig-user-id}/media`), so no app credentials, access
+token or authenticated session is required.
+
+```
+Pasted URL (https://www.instagram.com/reel/ABC123/)
+      │
+      ▼
+┌───────────────────────────────┐
+│ DirectUrlProcessor.process()  │
+│  1. GET canonical public page │  /reel|p/<shortcode>/
+│  2. GET public JSON view      │  ...?__a=1&__d=dis
+│  3. GET public embed page     │  .../embed/captioned/
+└──────────────┬────────────────┘
+               │ unescaped response body
+               ▼
+┌───────────────────────────────┐
+│ Extraction (no HTML parser)   │
+│  • video_versions[] → renditions (1080/720/480)
+│  • og:video / video_url / contentUrl → media URL
+│  • display_url / og:image → thumbnail
+│  • caption / og:title → title, video_duration → length
+│  • is_private / require_login / "page not found" → errors
+└──────────────┬────────────────┘
+               ▼
+┌───────────────────────────────┐
+│ MediaResolver                 │
+│  persists variants + sourceUrl│
+│  returns only internal URLs   │
+└──────────────┬────────────────┘
+               ▼
+┌───────────────────────────────┐
+│ DownloadService               │
+│  streams from the located     │
+│  direct media URL (server)    │
+└───────────────────────────────┘
+```
+
+Key properties:
+
+- **Extraction only reads what the response contains.** Instagram embeds the
+  renditions in `video_versions` and exposes them with escaped characters
+  (`https:\/\/…`, `\u0026`), so the body is unescaped before URL extraction.
+- **Variants are real.** Only renditions actually located in the page are
+  offered; the app never fabricates a quality that the source does not provide.
+- **The located media URL stays server-side.** It is persisted as
+  `MediaVariant.sourceUrl` for streaming and is stripped from API responses, so
+  clients only ever see `/api/reels/download/:resolutionId/:quality`.
+- **Signed URLs expire.** If Instagram rejects the stored media URL (401/403/410)
+  or no source URL was recorded, the download endpoint answers `410 EXPIRED` and
+  asks the client to resolve the reel again.
+- **Range requests are forwarded**, so players and resumable downloads work
+  (upstream `206` is passed through with `Content-Range`).
 
 ### 2. Service Layer
 
@@ -63,6 +122,7 @@ interface MediaProvider {
 services/
 ├── media/
 │   ├── MediaProvider.ts          # Interface definition
+│   ├── DirectUrlProcessor.ts     # Public-page fetch + media URL extraction
 │   ├── InstagramProvider.ts      # Instagram implementation
 │   ├── MediaResolver.ts          # Orchestrates resolution
 │   └── DownloadService.ts        # Handles streaming downloads
@@ -355,6 +415,8 @@ User Input URL
 ┌─────────────────┐
 │ Provider        │── Error ──▶ 500/404/451
 │ .resolveMedia() │
+│ (direct URL     │
+│  processing)    │
 └────────┬────────┘
          │ Success
          ▼
@@ -371,6 +433,12 @@ User Input URL
          ▼
     Return Response
 ```
+
+The provider step above is **direct URL processing** (`DirectUrlProcessor`): the
+backend requests the publicly accessible Instagram page for the pasted URL and
+locates the direct media URL in the response. The located URL is persisted next
+to each variant (`sourceUrl`) and used by `DownloadService` to stream the file;
+it is never included in API responses.
 
 ### 10. Known Limitations
 

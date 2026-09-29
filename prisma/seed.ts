@@ -40,6 +40,7 @@ async function main() {
   // Create sample resolutions
   const sampleResolutions = [
     {
+      id: 'ig_ABC123',
       url: 'https://www.instagram.com/reel/ABC123/',
       shortCode: 'ABC123',
       title: 'Amazing Nature Reel',
@@ -51,21 +52,21 @@ async function main() {
         {
           quality: 'original',
           format: 'mp4',
-          downloadUrl: '/api/reels/download/cm1abc123/original',
+          downloadUrl: '/api/reels/download/ig_ABC123/original',
           width: 1080,
           height: 1920,
         },
         {
           quality: 'hd',
           format: 'mp4',
-          downloadUrl: '/api/reels/download/cm1abc123/hd',
+          downloadUrl: '/api/reels/download/ig_ABC123/hd',
           width: 720,
           height: 1280,
         },
         {
           quality: 'sd',
           format: 'mp4',
-          downloadUrl: '/api/reels/download/cm1abc123/sd',
+          downloadUrl: '/api/reels/download/ig_ABC123/sd',
           width: 480,
           height: 854,
         },
@@ -75,6 +76,7 @@ async function main() {
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },
     {
+      id: 'ig_DEF456',
       url: 'https://www.instagram.com/reel/DEF456/',
       shortCode: 'DEF456',
       title: 'Funny Cat Video',
@@ -86,14 +88,14 @@ async function main() {
         {
           quality: 'original',
           format: 'mp4',
-          downloadUrl: '/api/reels/download/cm1def456/original',
+          downloadUrl: '/api/reels/download/ig_DEF456/original',
           width: 1080,
           height: 1920,
         },
         {
           quality: 'hd',
           format: 'mp4',
-          downloadUrl: '/api/reels/download/cm1def456/hd',
+          downloadUrl: '/api/reels/download/ig_DEF456/hd',
           width: 720,
           height: 1280,
         },

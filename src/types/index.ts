@@ -3,7 +3,17 @@
 export interface MediaVariant {
   quality: 'original' | 'hd' | 'sd';
   format: 'mp4' | 'webm';
+  /**
+   * URL that clients call to download this variant. Always an internal
+   * `/api/reels/download/:resolutionId/:quality` path.
+   */
   downloadUrl: string;
+  /**
+   * Direct CDN media URL located inside the publicly accessible Instagram page
+   * response (direct URL processing). This is what the backend streams from and
+   * is therefore server-side only - it is stripped before responses go out.
+   */
+  sourceUrl?: string;
   fileSize?: number;
   width?: number;
   height?: number;

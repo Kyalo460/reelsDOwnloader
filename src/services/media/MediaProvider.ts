@@ -9,6 +9,11 @@ export interface MediaProvider {
   validateUrl(url: string): Promise<ValidationResult>;
   resolveMedia(url: string): Promise<MediaResolutionResult>;
   getDownloadStream(mediaId: string, quality: string): Promise<Response>;
+  /**
+   * Headers the provider needs when the backend streams the direct media URL it
+   * located on the source (public) page, e.g. a Referer/Origin the CDN expects.
+   */
+  getMediaRequestHeaders(mediaUrl: string): Record<string, string>;
 }
 
 export abstract class BaseMediaProvider implements MediaProvider {
@@ -71,13 +76,28 @@ export abstract class BaseMediaProvider implements MediaProvider {
   }
 
   async getDownloadStream(mediaId: string, quality: string): Promise<Response> {
-    const downloadUrl = this.createDownloadUrl(mediaId, quality);
-    return fetch(downloadUrl, {
-      headers: {
-        'User-Agent': 'ReelDownloader/1.0',
-        Accept: 'video/mp4,video/webm,*/*',
-      },
+    // Providers hand out absolute media URLs (the direct URL located on the
+    // source page). Relative API paths are not reachable from the server, so
+    // reject them explicitly instead of failing with an opaque fetch error.
+    const target = /^https?:\/\//i.test(mediaId)
+      ? mediaId
+      : this.createDownloadUrl(mediaId, quality);
+
+    if (!/^https?:\/\//i.test(target)) {
+      throw new Error('MEDIA_UNAVAILABLE - A direct media URL is required');
+    }
+
+    return fetch(target, {
+      headers: this.getMediaRequestHeaders(target),
+      redirect: 'follow',
     });
+  }
+
+  getMediaRequestHeaders(_mediaUrl: string): Record<string, string> {
+    return {
+      'User-Agent': 'ReelDownloader/1.0',
+      Accept: 'video/mp4,video/webm,*/*',
+    };
   }
 
   protected abstract extractIdentifier(url: string): string | undefined;

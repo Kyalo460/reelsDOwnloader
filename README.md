@@ -5,6 +5,7 @@ A production-ready web application for downloading publicly accessible Instagram
 ## Features
 
 - **URL Validation** - Validates Instagram Reel URLs before processing
+- **Direct URL Processing** - Resolves reels by reading the publicly accessible Instagram page and locating the media URL in the response (no Meta Graph API, no access token)
 - **Media Preview** - Displays reel metadata and thumbnail before download
 - **Secure Downloads** - Streams media directly without storing large files
 - **Rate Limiting** - Protects against abuse with configurable limits
