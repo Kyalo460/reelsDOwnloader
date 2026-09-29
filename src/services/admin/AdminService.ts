@@ -1,9 +1,7 @@
 // Admin Service - For admin dashboard
 
-import { PrismaClient } from '@prisma/client';
+import { requirePrisma } from '@/lib/prisma';
 import type { AdminMetrics } from '@/types';
-
-const prisma = new PrismaClient();
 
 export interface TimeRange {
   from: Date;
@@ -18,8 +16,13 @@ export interface SystemHealth {
 }
 
 export class AdminService {
+  /** Admin reporting is database-only: there is no useful degraded mode. */
+  private get prisma() {
+    return requirePrisma();
+  }
+
   async getMetrics(range: TimeRange): Promise<AdminMetrics[]> {
-    const metrics = await prisma.adminMetric.findMany({
+    const metrics = await requirePrisma().adminMetric.findMany({
       where: {
         date: {
           gte: range.from,
@@ -45,7 +48,7 @@ export class AdminService {
     errors: number;
     avgLatencyMs: number;
   }> {
-    const metrics = await prisma.adminMetric.aggregate({
+    const metrics = await requirePrisma().adminMetric.aggregate({
       where: {
         date: {
           gte: range.from,
@@ -85,7 +88,7 @@ export class AdminService {
       count: number;
     }>
   > {
-    const errors = await prisma.reelResolution.groupBy({
+    const errors = await requirePrisma().reelResolution.groupBy({
       by: ['errorCode'],
       where: {
         errorCode: { not: null },
@@ -117,7 +120,7 @@ export class AdminService {
       errorCode: string | null;
     }>
   > {
-    return prisma.reelResolution.findMany({
+    return requirePrisma().reelResolution.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
       select: {
@@ -150,11 +153,11 @@ export class AdminService {
     redis: { keys: number; memory: string };
   }> {
     // Database size (PostgreSQL specific)
-    const dbSize = await prisma.$queryRaw<[{ size: string }]>`
+    const dbSize = await requirePrisma().$queryRaw<[{ size: string }]>`
       SELECT pg_size_pretty(pg_database_size(current_database())) as size
     `;
 
-    const tableCount = await prisma.$queryRaw<[{ count: bigint }]>`
+    const tableCount = await requirePrisma().$queryRaw<[{ count: bigint }]>`
       SELECT count(*)::bigint as count FROM information_schema.tables 
       WHERE table_schema = 'public'
     `;
@@ -188,7 +191,7 @@ export class AdminService {
 
   private async checkDatabase(): Promise<'connected' | 'disconnected'> {
     try {
-      await prisma.$queryRaw`SELECT 1`;
+      await requirePrisma().$queryRaw`SELECT 1`;
       return 'connected';
     } catch {
       return 'disconnected';
@@ -208,7 +211,7 @@ export class AdminService {
   }
 
   async cleanupExpiredResolutions(): Promise<number> {
-    const result = await prisma.reelResolution.deleteMany({
+    const result = await requirePrisma().reelResolution.deleteMany({
       where: {
         expiresAt: { lt: new Date() },
       },
@@ -220,7 +223,7 @@ export class AdminService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - daysToKeep);
 
-    const result = await prisma.adminMetric.deleteMany({
+    const result = await requirePrisma().adminMetric.deleteMany({
       where: { date: { lt: cutoff } },
     });
     return result.count;

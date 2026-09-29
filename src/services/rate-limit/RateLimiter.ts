@@ -1,4 +1,10 @@
 // Rate Limiter Service - Redis-based sliding window
+//
+// Redis is the primary store for rate limit counters, but a deployment without
+// a reachable `REDIS_URL` must not take the API down with it: an unavailable
+// limiter degrades to an in-process sliding window rather than failing the
+// request. On serverless that fallback is per warm instance, so it is a safety
+// net, not a distributed limit.
 
 import Redis from 'ioredis';
 
@@ -19,6 +25,10 @@ export interface RateLimitResult {
 export class RateLimiter {
   private redis: Redis;
   private configs: Map<string, RateLimitConfig> = new Map();
+  /** Sliding window used when Redis is unavailable. */
+  private fallback: MemorySlidingWindow = new MemorySlidingWindow();
+  /** Latched once Redis has failed, so we stop paying the connection timeout. */
+  private redisUnavailable = false;
 
   constructor(redisUrl: string) {
     this.redis = new Redis(redisUrl, {
@@ -46,6 +56,26 @@ export class RateLimiter {
     const now = Date.now();
     const windowStart = now - config.windowMs;
 
+    // An unreachable limiter must not fail the request it is protecting, so
+    // Redis errors fall through to the in-process window.
+    if (!this.redisUnavailable) {
+      try {
+        return await this.checkLimitWithRedis(key, config, now, windowStart);
+      } catch (error) {
+        this.redisUnavailable = true;
+        console.error('Redis unavailable, falling back to in-memory rate limiting:', error);
+      }
+    }
+
+    return this.fallback.checkLimit(key, config, now);
+  }
+
+  private async checkLimitWithRedis(
+    key: string,
+    config: RateLimitConfig,
+    now: number,
+    windowStart: number
+  ): Promise<RateLimitResult> {
     const pipeline = this.redis.pipeline();
 
     // Remove expired entries
@@ -67,17 +97,8 @@ export class RateLimiter {
     }
 
     const currentCount = (results[1]?.[1] as number) ?? 0;
-    const allowed = currentCount < config.maxRequests;
-    const remaining = Math.max(0, config.maxRequests - currentCount);
-    const reset = Math.ceil((now + config.windowMs) / 1000);
 
-    return {
-      allowed,
-      limit: config.maxRequests,
-      remaining,
-      reset,
-      retryAfter: allowed ? undefined : Math.ceil(config.windowMs / 1000),
-    };
+    return this.buildResult(config, currentCount, now);
   }
 
   async getLimitInfo(name: string, identifier: string): Promise<RateLimitResult> {
@@ -90,15 +111,18 @@ export class RateLimiter {
     const now = Date.now();
     const windowStart = now - config.windowMs;
 
-    await this.redis.zremrangebyscore(key, 0, windowStart);
-    const currentCount = await this.redis.zcard(key);
+    if (!this.redisUnavailable) {
+      try {
+        await this.redis.zremrangebyscore(key, 0, windowStart);
+        const currentCount = await this.redis.zcard(key);
+        return this.buildResult(config, currentCount, now);
+      } catch (error) {
+        this.redisUnavailable = true;
+        console.error('Redis unavailable, falling back to in-memory rate limiting:', error);
+      }
+    }
 
-    return {
-      allowed: currentCount < config.maxRequests,
-      limit: config.maxRequests,
-      remaining: Math.max(0, config.maxRequests - currentCount),
-      reset: Math.ceil((now + config.windowMs) / 1000),
-    };
+    return this.fallback.getLimitInfo(key, config, now);
   }
 
   async resetLimit(name: string, identifier: string): Promise<void> {
@@ -106,7 +130,29 @@ export class RateLimiter {
     if (!config) return;
 
     const key = `${config.keyPrefix}:${this.hashIdentifier(identifier)}`;
-    await this.redis.del(key);
+
+    if (!this.redisUnavailable) {
+      try {
+        await this.redis.del(key);
+      } catch (error) {
+        this.redisUnavailable = true;
+        console.error('Redis unavailable, falling back to in-memory rate limiting:', error);
+      }
+    }
+
+    this.fallback.reset(key);
+  }
+
+  private buildResult(config: RateLimitConfig, currentCount: number, now: number): RateLimitResult {
+    const allowed = currentCount < config.maxRequests;
+
+    return {
+      allowed,
+      limit: config.maxRequests,
+      remaining: Math.max(0, config.maxRequests - currentCount),
+      reset: Math.ceil((now + config.windowMs) / 1000),
+      retryAfter: allowed ? undefined : Math.ceil(config.windowMs / 1000),
+    };
   }
 
   private hashIdentifier(identifier: string): string {
@@ -121,7 +167,73 @@ export class RateLimiter {
   }
 
   async disconnect(): Promise<void> {
-    await this.redis.quit();
+    try {
+      await this.redis.quit();
+    } catch {
+      this.redis.disconnect();
+    }
+  }
+}
+
+/**
+ * In-process sliding window with the same semantics as the Redis one: entries
+ * older than the window are dropped, and a request is only counted when the
+ * window still has room.
+ */
+class MemorySlidingWindow {
+  private readonly hits: Map<string, number[]> = new Map();
+
+  checkLimit(key: string, config: RateLimitConfig, now: number): RateLimitResult {
+    const timestamps = this.prune(key, config.windowMs, now);
+
+    if (timestamps.length >= config.maxRequests) {
+      return {
+        allowed: false,
+        limit: config.maxRequests,
+        remaining: 0,
+        reset: Math.ceil(((timestamps[0] ?? now) + config.windowMs) / 1000),
+        retryAfter: Math.ceil(config.windowMs / 1000),
+      };
+    }
+
+    timestamps.push(now);
+    this.hits.set(key, timestamps);
+
+    return {
+      allowed: true,
+      limit: config.maxRequests,
+      remaining: config.maxRequests - timestamps.length,
+      reset: Math.ceil((now + config.windowMs) / 1000),
+    };
+  }
+
+  getLimitInfo(key: string, config: RateLimitConfig, now: number): RateLimitResult {
+    const timestamps = this.prune(key, config.windowMs, now);
+    const count = timestamps.length;
+
+    return {
+      allowed: count < config.maxRequests,
+      limit: config.maxRequests,
+      remaining: Math.max(0, config.maxRequests - count),
+      reset: Math.ceil((now + config.windowMs) / 1000),
+    };
+  }
+
+  reset(key: string): void {
+    this.hits.delete(key);
+  }
+
+  private prune(key: string, windowMs: number, now: number): number[] {
+    const cutoff = now - windowMs;
+    const timestamps = (this.hits.get(key) ?? []).filter((time) => time > cutoff);
+
+    if (timestamps.length) {
+      this.hits.set(key, timestamps);
+    } else {
+      this.hits.delete(key);
+    }
+
+    return timestamps;
   }
 }
 

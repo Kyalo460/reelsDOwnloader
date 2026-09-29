@@ -1,12 +1,15 @@
 // Download Service - Handles streaming downloads
 
+// Registers the Instagram provider in the shared registry, so the media request
+// headers (Referer/Origin) the CDN expects are available here. A side-effect
+// import on purpose: without it the registry stays empty and every request
+// falls back to generic headers that the CDN rejects.
+import './InstagramProvider';
 import { providerRegistry } from './MediaProvider';
-import { PrismaClient } from '@prisma/client';
+import { resolutionStore } from './resolutionStore';
+import type { StoredResolution, StoredMediaVariant } from './resolutionStore';
+import { getPrisma } from '@/lib/prisma';
 import { hashString } from '@/lib/utils';
-
-const prisma = new PrismaClient();
-
-type StoredResolution = NonNullable<Awaited<ReturnType<typeof prisma.reelResolution.findUnique>>>;
 
 export interface DownloadOptions {
   resolutionId: string;
@@ -26,14 +29,7 @@ export interface StreamResult {
 }
 
 /** The subset of a persisted media variant the download path cares about. */
-export interface StoredMediaVariant {
-  quality: string;
-  format: string;
-  /** Internal download endpoint handed to clients. Never a media source. */
-  downloadUrl?: string;
-  /** Direct media URL located on the public Instagram page. */
-  sourceUrl?: string;
-}
+export type { StoredMediaVariant };
 
 export class DownloadService {
   private readonly maxFileSize = 100 * 1024 * 1024; // 100MB
@@ -142,13 +138,27 @@ export class DownloadService {
   }
 
   private async findResolution(resolutionId: string): Promise<StoredResolution | null> {
-    const direct = await prisma.reelResolution.findUnique({ where: { id: resolutionId } });
-    if (direct) return direct;
-
+    const prisma = getPrisma();
     const shortCode = shortCodeFromResolutionId(resolutionId);
-    if (!shortCode) return null;
 
-    return prisma.reelResolution.findUnique({ where: { shortCode } });
+    if (prisma) {
+      const direct = await prisma.reelResolution.findUnique({ where: { id: resolutionId } });
+      if (direct) return direct as unknown as StoredResolution;
+
+      if (shortCode) {
+        const byShortCode = await prisma.reelResolution.findUnique({ where: { shortCode } });
+        if (byShortCode) return byShortCode as unknown as StoredResolution;
+      }
+
+      return null;
+    }
+
+    // No database: fall back to the store the resolver populated for this
+    // instance, matching the same id-then-shortcode lookup order.
+    return (
+      resolutionStore.getById(resolutionId) ??
+      (shortCode ? resolutionStore.getByShortCode(shortCode) : null)
+    );
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -216,6 +226,9 @@ export class DownloadService {
     ipAddress: string;
     userId?: string;
   }): Promise<void> {
+    const prisma = getPrisma();
+    if (!prisma) return;
+
     await prisma.download.create({
       data: {
         resolutionId: data.resolutionId,
@@ -247,6 +260,11 @@ export class DownloadService {
     totalDownloads: number;
     byQuality: Record<string, number>;
   }> {
+    const prisma = getPrisma();
+    if (!prisma) {
+      return { totalDownloads: 0, byQuality: {} };
+    }
+
     const downloads = await prisma.download.groupBy({
       by: ['mediaQuality'],
       where: { resolutionId },

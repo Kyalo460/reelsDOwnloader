@@ -23,6 +23,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "security:audit": "npm audit --audit-level=high",
+    "postinstall": "prisma generate",
     "prepare": "husky install"
   },
   "dependencies": {

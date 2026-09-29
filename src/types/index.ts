@@ -102,7 +102,8 @@ export interface HealthCheckResponse {
   timestamp: string;
   version: string;
   uptime: number;
-  checks?: Record<string, 'connected' | 'disconnected' | 'unknown'>;
+  /** `not_configured` marks an optional dependency that is not in use. */
+  checks?: Record<string, 'connected' | 'disconnected' | 'not_configured'>;
 }
 
 export interface AdminMetrics {

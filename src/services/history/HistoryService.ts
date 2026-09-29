@@ -1,9 +1,7 @@
 // History Service - For authenticated users
 
-import { PrismaClient } from '@prisma/client';
+import { requirePrisma } from '@/lib/prisma';
 import type { DownloadHistoryEntry, PaginatedResponse } from '@/types';
-
-const prisma = new PrismaClient();
 
 export interface HistoryOptions {
   userId: string;
@@ -15,6 +13,11 @@ export class HistoryService {
   private readonly defaultPageSize = 20;
   private readonly maxPageSize = 100;
 
+  /** History is a database-only feature: there is no useful degraded mode. */
+  private get prisma() {
+    return requirePrisma();
+  }
+
   async getHistory(options: HistoryOptions): Promise<PaginatedResponse<DownloadHistoryEntry>> {
     const page = Math.max(1, options.page || 1);
     const pageSize = Math.min(
@@ -24,7 +27,7 @@ export class HistoryService {
     const skip = (page - 1) * pageSize;
 
     const [resolutions, total] = await Promise.all([
-      prisma.reelResolution.findMany({
+      requirePrisma().reelResolution.findMany({
         where: { userId: options.userId },
         orderBy: { createdAt: 'desc' },
         skip,
@@ -36,7 +39,7 @@ export class HistoryService {
           },
         },
       }),
-      prisma.reelResolution.count({
+      requirePrisma().reelResolution.count({
         where: { userId: options.userId },
       }),
     ]);
@@ -81,7 +84,7 @@ export class HistoryService {
   }
 
   async deleteEntry(userId: string, resolutionId: string): Promise<boolean> {
-    const result = await prisma.reelResolution.deleteMany({
+    const result = await requirePrisma().reelResolution.deleteMany({
       where: {
         id: resolutionId,
         userId,
@@ -92,7 +95,7 @@ export class HistoryService {
   }
 
   async clearHistory(userId: string): Promise<number> {
-    const result = await prisma.reelResolution.deleteMany({
+    const result = await requirePrisma().reelResolution.deleteMany({
       where: { userId },
     });
 
@@ -105,8 +108,8 @@ export class HistoryService {
     totalSize: number;
   }> {
     const [resolutions, downloads] = await Promise.all([
-      prisma.reelResolution.count({ where: { userId } }),
-      prisma.download.aggregate({
+      requirePrisma().reelResolution.count({ where: { userId } }),
+      requirePrisma().download.aggregate({
         where: { userId },
         _count: { id: true },
         _sum: { fileSize: true },

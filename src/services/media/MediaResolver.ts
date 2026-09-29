@@ -1,13 +1,16 @@
 // Media Resolver - Orchestrates media resolution
 
+// Registers the Instagram provider in the shared registry. It is a side-effect
+// import on purpose: without it the registry stays empty at runtime and every
+// URL is rejected as UNSUPPORTED_URL.
+import './InstagramProvider';
 import { providerRegistry, MediaProvider } from './MediaProvider';
+import { resolutionStore } from './resolutionStore';
 import type { MediaResolutionResult, ErrorCode, ValidationResult } from '@/types';
 import { ERROR_STATUS_MAP } from '@/types';
-import { PrismaClient } from '@prisma/client';
+import { getPrisma } from '@/lib/prisma';
 import { hashString } from '@/lib/utils';
 import { parseInstagramMediaUrl } from '@/lib/instagramUrl';
-
-const prisma = new PrismaClient();
 
 export interface ResolutionOptions {
   ipAddress: string;
@@ -112,6 +115,9 @@ export class MediaResolver {
   }
 
   private async getFromDatabase(shortCode: string): Promise<CachedResolution | null> {
+    const prisma = getPrisma();
+    if (!prisma) return null;
+
     const record = await prisma.reelResolution.findUnique({
       where: { shortCode },
     });
@@ -146,16 +152,39 @@ export class MediaResolver {
     originalUrl: string
   ): Promise<{ id: string; media: MediaResolutionResult['media'] }> {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    const existing = await prisma.reelResolution.findUnique({
-      where: { shortCode: result.shortCode },
-      select: { id: true },
-    });
+    const prisma = getPrisma();
 
     // Reuse the existing record id (links already handed out keep working),
     // otherwise adopt the provider id (`ig_<shortcode>`).
+    const existing = prisma
+      ? await prisma.reelResolution.findUnique({
+          where: { shortCode: result.shortCode },
+          select: { id: true },
+        })
+      : null;
+
     const resolutionId = existing?.id ?? result.id;
     const media = canonicalizeMedia(result.media, resolutionId);
+    const ipHash = hashString(options.ipAddress);
+
+    if (!prisma) {
+      // No database: keep the located media URL in memory so the download
+      // endpoint can still stream it for the lifetime of this instance.
+      resolutionStore.put({
+        id: resolutionId,
+        url: originalUrl,
+        shortCode: result.shortCode,
+        title: result.title,
+        thumbnail: result.thumbnail,
+        duration: result.duration,
+        media,
+        ipHash,
+        userId: options.userId,
+        expiresAt,
+      });
+
+      return { id: resolutionId, media };
+    }
 
     await prisma.reelResolution.upsert({
       where: { shortCode: result.shortCode },
@@ -179,7 +208,7 @@ export class MediaResolver {
         duration: result.duration,
         status: 'RESOLVED',
         media: media as any,
-        ipHash: hashString(options.ipAddress),
+        ipHash,
         userId: options.userId,
         expiresAt,
       },
@@ -196,6 +225,9 @@ export class MediaResolver {
     success: boolean,
     error?: unknown
   ): Promise<void> {
+    const prisma = getPrisma();
+    if (!prisma) return;
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -256,6 +288,11 @@ export class MediaResolver {
 
   async invalidateCache(shortCode: string): Promise<void> {
     this.cache.delete(shortCode);
+    resolutionStore.deleteByShortCode(shortCode);
+
+    const prisma = getPrisma();
+    if (!prisma) return;
+
     await prisma.reelResolution.updateMany({
       where: { shortCode },
       data: { status: 'EXPIRED' },
@@ -263,6 +300,11 @@ export class MediaResolver {
   }
 
   async cleanup(): Promise<number> {
+    resolutionStore.prune();
+
+    const prisma = getPrisma();
+    if (!prisma) return 0;
+
     const result = await prisma.reelResolution.deleteMany({
       where: {
         expiresAt: { lt: new Date() },

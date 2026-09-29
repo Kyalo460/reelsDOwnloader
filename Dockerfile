@@ -9,6 +9,9 @@ WORKDIR /app
 # Install dependencies only when needed
 FROM base AS deps
 COPY package.json package-lock.json* ./
+# The prisma/ folder has to be present before `npm ci` because the postinstall
+# hook runs `prisma generate` and needs the schema.
+COPY prisma ./prisma/
 RUN npm ci
 
 # Generate Prisma client
