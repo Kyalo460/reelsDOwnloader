@@ -5,6 +5,7 @@ import type { MediaResolutionResult, ErrorCode, ValidationResult } from '@/types
 import { ERROR_STATUS_MAP } from '@/types';
 import { PrismaClient } from '@prisma/client';
 import { hashString } from '@/lib/utils';
+import { parseInstagramMediaUrl } from '@/lib/instagramUrl';
 
 const prisma = new PrismaClient();
 
@@ -24,10 +25,14 @@ export class MediaResolver {
   private readonly cacheTtl = 1800000; // 30 minutes
 
   async resolve(url: string, options: ResolutionOptions): Promise<MediaResolutionResult> {
-    const shortCode = this.extractShortCode(url);
-    if (!shortCode) {
+    // Normalise once here so the cache key, provider lookup, validation and
+    // page fetch all agree, no matter how the URL was pasted.
+    const media = parseInstagramMediaUrl(url);
+    if (!media) {
       throw this.createError('INVALID_URL', 'Invalid Instagram Reel URL');
     }
+    const shortCode = media.shortCode;
+    const target = media.url;
 
     // Check memory cache first
     const cached = this.getFromCache(shortCode);
@@ -45,13 +50,13 @@ export class MediaResolver {
     }
 
     // Get provider
-    const provider = providerRegistry.getProvider(url);
+    const provider = providerRegistry.getProvider(target);
     if (!provider) {
       throw this.createError('UNSUPPORTED_URL', 'No provider available for this URL');
     }
 
     // Validate URL
-    const validation = await provider.validateUrl(url);
+    const validation = await provider.validateUrl(target);
     if (!validation.valid) {
       throw this.createError(
         (validation.error?.code as ErrorCode) || 'INVALID_URL',
@@ -62,7 +67,7 @@ export class MediaResolver {
     // Resolve media
     let result: MediaResolutionResult;
     try {
-      result = await provider.resolveMedia(url);
+      result = await provider.resolveMedia(target);
     } catch (error) {
       await this.recordResolution(shortCode, options, false, error);
       throw this.mapProviderError(error);
@@ -70,7 +75,7 @@ export class MediaResolver {
 
     // Persist the located media URL and canonicalise the client-facing URLs so
     // every variant points at a resolvable resolution record.
-    const persisted = await this.persistResolution(result, options, url);
+    const persisted = await this.persistResolution(result, options, target);
 
     // The located direct media URL stays server-side: clients only ever receive
     // the internal download endpoint.
@@ -89,11 +94,6 @@ export class MediaResolver {
     await this.recordResolution(shortCode, options, true);
 
     return publicResult;
-  }
-
-  private extractShortCode(url: string): string | undefined {
-    const match = url.match(/\/(reel|p)\/([A-Za-z0-9_-]+)/);
-    return match ? match[2] : undefined;
   }
 
   private getFromCache(shortCode: string): MediaResolutionResult | null {

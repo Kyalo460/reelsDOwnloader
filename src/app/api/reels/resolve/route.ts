@@ -11,8 +11,15 @@ import { hashString, generateId } from '@/lib/utils';
 import type { ErrorCode } from '@/types';
 import { ERROR_STATUS_MAP } from '@/types';
 
+// Shape-only guard. The strict, normalising check lives in `urlValidator`,
+// which accepts pasted text (missing scheme, `?igsh=…`, `#media`) and
+// performs the domain allowlist, so it must run first.
 const resolveSchema = z.object({
-  url: z.string().url('Invalid URL format').max(2048, 'URL too long'),
+  url: z
+    .string({ required_error: 'URL is required', invalid_type_error: 'URL must be a string' })
+    .trim()
+    .min(1, 'URL is required')
+    .max(2048, 'URL too long'),
 });
 
 export async function POST(request: NextRequest) {
@@ -57,6 +64,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Resolve the canonical URL so downstream caching, provider lookup and the
+    // page fetch all use the same normalised form.
+    const target = validation.url ?? url;
+
     // Check rate limit
     const rateLimiter = getRateLimiter();
     const rateLimitResult = await rateLimiter.checkLimit('api:resolve', ipAddress);
@@ -75,7 +86,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Resolve media
-    const result = await mediaResolver.resolve(url, {
+    const result = await mediaResolver.resolve(target, {
       ipAddress,
       userId: undefined, // No auth yet
     });

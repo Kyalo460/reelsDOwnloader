@@ -26,6 +26,37 @@ describe('UrlValidator', () => {
       }
     });
 
+    it('should accept the URLs people actually paste', () => {
+      // Shapes produced by the Instagram app's share/copy-link actions.
+      const validUrls = [
+        'https://www.instagram.com/reel/ABC123/?igshid=abc123',
+        'https://www.instagram.com/reel/ABC123/?igsh=MQ3xyz',
+        'https://www.instagram.com/reel/ABC123/?utm_source=ig_web_copy_link',
+        'https://www.instagram.com/reel/ABC123#media',
+        'https://instagram.com/reels/ABC123',
+        'https://www.instagram.com/tv/ABC123/',
+        'https://www.instagram.com/p/ABC123/?img_index=1',
+        'https://www.instagram.com/share/reel/ABC123/',
+        // Pasted without a scheme.
+        'instagram.com/reel/ABC123',
+        'www.instagram.com/reel/ABC123/',
+      ];
+
+      for (const url of validUrls) {
+        const result = urlValidator.validate(url);
+        expect(result.valid, url).toBe(true);
+        expect(result.shortCode, url).toBe('ABC123');
+      }
+    });
+
+    it('should return a canonical URL with the query string stripped', () => {
+      const result = urlValidator.validate(
+        'https://www.instagram.com/reel/ABC123/?igshid=xyz#media'
+      );
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('https://www.instagram.com/reel/ABC123');
+    });
+
     it('should reject empty URLs', () => {
       const result = urlValidator.validate('');
       expect(result.valid).toBe(false);
@@ -62,16 +93,47 @@ describe('UrlValidator', () => {
     it('should reject invalid URL formats', () => {
       const invalidUrls = [
         'not-a-url',
-        'instagram.com/reel/ABC123',
-        'www.instagram.com/reel/ABC123',
         'https://instagram.com/invalid/path',
         'https://www.instagram.com/reel/', // missing shortcode
+        'https://www.instagram.com/reel', // missing shortcode
+        'https://www.instagram.com/explore/tags/sunset/',
+        'https://www.instagram.com/stories/someone/12345/',
+        'https://www.instagram.com/reel/ABC123/extra/segments/',
       ];
 
       for (const url of invalidUrls) {
         const result = urlValidator.validate(url);
-        expect(result.valid).toBe(false);
-        expect(['INVALID_URL', 'UNSUPPORTED_URL']).toContain(result.error?.code);
+        expect(result.valid, url).toBe(false);
+        expect(['INVALID_URL', 'UNSUPPORTED_URL'], url).toContain(result.error?.code);
+      }
+    });
+
+    it('should reject non-http(s) schemes', () => {
+      const invalidUrls = [
+        'javascript:alert(1)',
+        'file:///etc/passwd',
+        'ftp://instagram.com/reel/ABC123',
+      ];
+
+      for (const url of invalidUrls) {
+        const result = urlValidator.validate(url);
+        expect(result.valid, url).toBe(false);
+        expect(['INVALID_URL', 'UNSUPPORTED_URL'], url).toContain(result.error?.code);
+      }
+    });
+
+    it('should not let a lookalike domain slip through the allowlist', () => {
+      const lookalikes = [
+        'https://instagram.com.evil.example/reel/ABC123',
+        'https://notinstagram.com/reel/ABC123',
+        'https://instagram.co/reel/ABC123',
+        'https://evilinstagram.com/reel/ABC123',
+      ];
+
+      for (const url of lookalikes) {
+        const result = urlValidator.validate(url);
+        expect(result.valid, url).toBe(false);
+        expect(result.error?.code, url).toBe('UNSUPPORTED_URL');
       }
     });
 

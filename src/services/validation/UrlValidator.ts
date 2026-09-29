@@ -1,15 +1,12 @@
 // URL Validation Service
 
 import type { ValidationResult, ErrorCode } from '@/types';
+import {
+  isInstagramHostname,
+  normalizeInstagramUrl,
+  parseInstagramMediaUrl,
+} from '@/lib/instagramUrl';
 
-const INSTAGRAM_REEL_PATTERNS = [
-  /^https?:\/\/(www\.)?instagram\.com\/reel\/[A-Za-z0-9_-]+\/?$/i,
-  /^https?:\/\/instagram\.com\/reel\/[A-Za-z0-9_-]+\/?$/i,
-  /^https?:\/\/(www\.)?instagram\.com\/p\/[A-Za-z0-9_-]+\/?$/i,
-  /^https?:\/\/instagram\.com\/p\/[A-Za-z0-9_-]+\/?$/i,
-];
-
-const ALLOWED_DOMAINS = ['instagram.com', 'www.instagram.com'];
 const BLOCKED_HOSTS = ['localhost', '127.0.0.1', '169.254.169.254', '0.0.0.0'];
 
 const PRIVATE_IP_RANGES = [
@@ -22,6 +19,13 @@ const PRIVATE_IP_RANGES = [
   /^fc00:/i,
   /^fe80:/i,
 ];
+
+/** Hostname without the brackets `URL` adds around IPv6 literals. */
+function bareHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
 
 export class UrlValidator {
   private readonly maxUrlLength = 2048;
@@ -42,43 +46,43 @@ export class UrlValidator {
       );
     }
 
-    // Parse URL
-    let parsed: URL;
-    try {
-      parsed = new URL(trimmed);
-    } catch {
+    // Parse URL. Normalisation tolerates pasted text: a missing scheme,
+    // surrounding quotes and trailing `?igsh=…` / `#media` fragments.
+    const parsed = normalizeInstagramUrl(trimmed);
+    if (!parsed) {
       return this.error('INVALID_URL', 'Invalid URL format');
     }
 
-    // Check protocol
+    // We always request the page ourselves, so never downgrade to plaintext.
     if (parsed.protocol !== 'https:') {
       return this.error('INVALID_URL', 'Only HTTPS URLs are allowed');
     }
 
     // Check blocked hosts (before domain check)
-    const hostname = parsed.hostname.toLowerCase();
-    if (BLOCKED_HOSTS.includes(hostname)) {
+    const hostname = bareHostname(parsed.hostname).toLowerCase();
+    if (
+      BLOCKED_HOSTS.includes(hostname) ||
+      PRIVATE_IP_RANGES.some((range) => range.test(hostname))
+    ) {
       return this.error('NOT_PERMITTED', 'Access to local resources is not permitted');
     }
 
     // Check domain
-    if (!ALLOWED_DOMAINS.some((d) => hostname === d || hostname.endsWith(`.${d}`))) {
+    if (!isInstagramHostname(hostname)) {
       return this.error('UNSUPPORTED_URL', 'Only Instagram URLs are supported');
     }
 
-    // Check path pattern
-    const isValidPattern = INSTAGRAM_REEL_PATTERNS.some((pattern) => pattern.test(trimmed));
-    if (!isValidPattern) {
+    // Check path pattern: /reel, /reels, /p or /tv followed by a shortcode,
+    // with or without a query string, fragment or trailing slash.
+    const media = parseInstagramMediaUrl(trimmed);
+    if (!media) {
       return this.error('UNSUPPORTED_URL', 'URL must be an Instagram Reel or Post URL');
     }
 
-    // Extract short code
-    const shortCodeMatch = trimmed.match(/\/(reel|p)\/([A-Za-z0-9_-]+)/);
-    const shortCode = shortCodeMatch ? shortCodeMatch[2] : null;
-
     return {
       valid: true,
-      shortCode: shortCode || undefined,
+      shortCode: media.shortCode,
+      url: media.url,
     };
   }
 

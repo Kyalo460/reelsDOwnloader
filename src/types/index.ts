@@ -32,6 +32,11 @@ export interface MediaResolutionResult {
 export interface ValidationResult {
   valid: boolean;
   shortCode?: string;
+  /**
+   * Canonical absolute URL (normalised scheme/host, no query string or
+   * fragment) to use for resolution. Present whenever `valid` is true.
+   */
+  url?: string;
   error?: {
     code: string;
     message: string;

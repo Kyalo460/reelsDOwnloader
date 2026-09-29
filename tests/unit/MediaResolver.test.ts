@@ -89,7 +89,23 @@ describe('MediaResolver', () => {
       const args = upsertArgs();
       expect(args.create.id).toBe(`ig_${SHORT_CODE}`);
       expect(args.create.media[0]?.sourceUrl).toBe(SOURCE_URL);
-      expect(args.create.url).toBe(REEL_URL);
+      // Persisted in canonical form, so the cache key never depends on how the
+      // URL was pasted (trailing slash, `?igsh=…`, missing scheme, …).
+      expect(args.create.url).toBe(`https://www.instagram.com/reel/${SHORT_CODE}`);
+    });
+
+    it('normalises the pasted URL before caching and resolving', async () => {
+      const resolver = new MediaResolver();
+
+      await resolver.resolve(
+        `https://www.instagram.com/reel/${SHORT_CODE}/?igshid=abc123#media`,
+        { ipAddress: '203.0.113.9' }
+      );
+
+      expect(upsertArgs().create.url).toBe(`https://www.instagram.com/reel/${SHORT_CODE}`);
+      expect(resolveMediaMock).toHaveBeenCalledWith(
+        `https://www.instagram.com/reel/${SHORT_CODE}`
+      );
     });
 
     it('reuses an existing record id so issued download links keep working', async () => {

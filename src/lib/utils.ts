@@ -2,6 +2,10 @@
 
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import {
+  extractShortCodeFromInstagramUrl,
+  isInstagramMediaUrl,
+} from '@/lib/instagramUrl';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -138,21 +142,11 @@ export function getDomain(url: string): string {
 }
 
 export function isInstagramReelUrl(url: string): boolean {
-  const patterns = [
-    /^https?:\/\/(www\.)?instagram\.com\/reel\/[A-Za-z0-9_-]+\/?$/,
-    /^https?:\/\/instagram\.com\/reel\/[A-Za-z0-9_-]+\/?$/,
-    /^https?:\/\/(www\.)?instagram\.com\/p\/[A-Za-z0-9_-]+\/?$/,
-    /^https?:\/\/instagram\.com\/p\/[A-Za-z0-9_-]+\/?$/,
-  ];
-  return patterns.some((pattern) => pattern.test(url));
+  return isInstagramMediaUrl(url);
 }
 
 export function extractShortCode(url: string): string | undefined {
-  if (!isInstagramReelUrl(url)) {
-    return undefined;
-  }
-  const match = url.match(/\/(reel|p)\/([A-Za-z0-9_-]+)/);
-  return match ? match[2] : undefined;
+  return extractShortCodeFromInstagramUrl(url);
 }
 
 export function createSafeUrl(base: string, path: string): string {
