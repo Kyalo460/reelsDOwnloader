@@ -22,9 +22,7 @@ const PRIVATE_IP_RANGES = [
 
 /** Hostname without the brackets `URL` adds around IPv6 literals. */
 function bareHostname(hostname: string): string {
-  return hostname.startsWith('[') && hostname.endsWith(']')
-    ? hostname.slice(1, -1)
-    : hostname;
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
 export class UrlValidator {

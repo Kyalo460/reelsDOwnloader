@@ -97,15 +97,12 @@ describe('MediaResolver', () => {
     it('normalises the pasted URL before caching and resolving', async () => {
       const resolver = new MediaResolver();
 
-      await resolver.resolve(
-        `https://www.instagram.com/reel/${SHORT_CODE}/?igshid=abc123#media`,
-        { ipAddress: '203.0.113.9' }
-      );
+      await resolver.resolve(`https://www.instagram.com/reel/${SHORT_CODE}/?igshid=abc123#media`, {
+        ipAddress: '203.0.113.9',
+      });
 
       expect(upsertArgs().create.url).toBe(`https://www.instagram.com/reel/${SHORT_CODE}`);
-      expect(resolveMediaMock).toHaveBeenCalledWith(
-        `https://www.instagram.com/reel/${SHORT_CODE}`
-      );
+      expect(resolveMediaMock).toHaveBeenCalledWith(`https://www.instagram.com/reel/${SHORT_CODE}`);
     });
 
     it('reuses an existing record id so issued download links keep working', async () => {

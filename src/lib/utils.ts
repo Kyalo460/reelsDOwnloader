@@ -2,10 +2,7 @@
 
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import {
-  extractShortCodeFromInstagramUrl,
-  isInstagramMediaUrl,
-} from '@/lib/instagramUrl';
+import { extractShortCodeFromInstagramUrl, isInstagramMediaUrl } from '@/lib/instagramUrl';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
