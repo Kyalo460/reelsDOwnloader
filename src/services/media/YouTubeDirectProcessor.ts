@@ -153,7 +153,12 @@ export class YouTubeDirectProcessor {
       try {
         const extracted = await this.fetchVideoInfoOembed(id);
         return this.toResolutionResultOembed(id, extracted);
-      } catch {
+      } catch (oembedError) {
+        // If oEmbed also failed with NOT_FOUND, the video likely doesn't exist.
+        // Prefer that error over the yt-dlp error since it's more accurate.
+        if (oembedError instanceof YouTubeDirectError && oembedError.code === 'NOT_FOUND') {
+          throw oembedError;
+        }
         throw originalError;
       }
     }
