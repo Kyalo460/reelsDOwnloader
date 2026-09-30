@@ -55,7 +55,7 @@ export class DownloadService {
       throw new Error('NOT_FOUND');
     }
 
-    // The direct media URL located on the public Instagram page is the actual
+    // The direct media URL located on the public page is the actual
     // source we stream from. Instagram signs those URLs, so a missing source
     // means the client should resolve the reel again.
     const sourceUrl = resolveSourceUrl(variant);
@@ -138,22 +138,25 @@ export class DownloadService {
   }
 
   private async findResolution(resolutionId: string): Promise<StoredResolution | null> {
-    const prisma = getPrisma();
     const shortCode = shortCodeFromResolutionId(resolutionId);
+    const prisma = getPrisma();
 
     if (prisma) {
-      const direct = await prisma.reelResolution.findUnique({ where: { id: resolutionId } });
-      if (direct) return direct as unknown as StoredResolution;
+      try {
+        const direct = await prisma.reelResolution.findUnique({ where: { id: resolutionId } });
+        if (direct) return direct as unknown as StoredResolution;
 
-      if (shortCode) {
-        const byShortCode = await prisma.reelResolution.findUnique({ where: { shortCode } });
-        if (byShortCode) return byShortCode as unknown as StoredResolution;
+        if (shortCode) {
+          const byShortCode = await prisma.reelResolution.findUnique({ where: { shortCode } });
+          if (byShortCode) return byShortCode as unknown as StoredResolution;
+        }
+      } catch {
+        // Database might be unavailable or schema not migrated.
+        // Fall through to in-memory store.
       }
-
-      return null;
     }
 
-    // No database: fall back to the store the resolver populated for this
+    // No database or query failed: fall back to the store the resolver populated for this
     // instance, matching the same id-then-shortcode lookup order.
     return (
       resolutionStore.getById(resolutionId) ??
@@ -229,31 +232,35 @@ export class DownloadService {
     const prisma = getPrisma();
     if (!prisma) return;
 
-    await prisma.download.create({
-      data: {
-        resolutionId: data.resolutionId,
-        mediaQuality: data.quality,
-        mediaFormat: data.format,
-        fileSize: data.fileSize ? BigInt(data.fileSize) : null,
-        ipHash: hashString(data.ipAddress),
-        userId: data.userId,
-      },
-    });
+    try {
+      await prisma.download.create({
+        data: {
+          resolutionId: data.resolutionId,
+          mediaQuality: data.quality,
+          mediaFormat: data.format,
+          fileSize: data.fileSize ? BigInt(data.fileSize) : null,
+          ipHash: hashString(data.ipAddress),
+          userId: data.userId,
+        },
+      });
 
-    // Update daily metrics
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+      // Update daily metrics
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
 
-    await prisma.adminMetric.upsert({
-      where: { date: today },
-      update: {
-        totalDownloads: { increment: 1 },
-      },
-      create: {
-        date: today,
-        totalDownloads: 1,
-      },
-    });
+      await prisma.adminMetric.upsert({
+        where: { date: today },
+        update: {
+          totalDownloads: { increment: 1 },
+        },
+        create: {
+          date: today,
+          totalDownloads: 1,
+        },
+      });
+    } catch {
+      // Metrics are best-effort; ignore database errors.
+    }
   }
 
   async getDownloadStats(resolutionId: string): Promise<{
@@ -265,21 +272,25 @@ export class DownloadService {
       return { totalDownloads: 0, byQuality: {} };
     }
 
-    const downloads = await prisma.download.groupBy({
-      by: ['mediaQuality'],
-      where: { resolutionId },
-      _count: { id: true },
-    });
+    try {
+      const downloads = await prisma.download.groupBy({
+        by: ['mediaQuality'],
+        where: { resolutionId },
+        _count: { id: true },
+      });
 
-    const byQuality: Record<string, number> = {};
-    let total = 0;
+      const byQuality: Record<string, number> = {};
+      let total = 0;
 
-    for (const d of downloads) {
-      byQuality[d.mediaQuality] = d._count.id;
-      total += d._count.id;
+      for (const d of downloads) {
+        byQuality[d.mediaQuality] = d._count.id;
+        total += d._count.id;
+      }
+
+      return { totalDownloads: total, byQuality };
+    } catch {
+      return { totalDownloads: 0, byQuality: {} };
     }
-
-    return { totalDownloads: total, byQuality };
   }
 }
 

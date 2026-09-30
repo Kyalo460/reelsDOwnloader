@@ -87,18 +87,18 @@ export async function GET(
     if (error instanceof Error) {
       const message = error.message;
 
-      if (message === 'NOT_FOUND') {
+      if (message === 'NOT_FOUND' || message.startsWith('NOT_FOUND')) {
         return new NextResponse('Not found', { status: 404 });
       }
-      if (message === 'EXPIRED') {
+      if (message === 'EXPIRED' || message.startsWith('EXPIRED')) {
         return new NextResponse('Download link expired, please resolve the reel again', {
           status: 410,
         });
       }
-      if (message === 'FILE_TOO_LARGE') {
+      if (message === 'FILE_TOO_LARGE' || message.startsWith('FILE_TOO_LARGE')) {
         return new NextResponse('File too large', { status: 413 });
       }
-      if (message === 'MEDIA_UNAVAILABLE') {
+      if (message === 'MEDIA_UNAVAILABLE' || message.startsWith('MEDIA_UNAVAILABLE')) {
         return new NextResponse('Media unavailable', { status: 404 });
       }
     }
