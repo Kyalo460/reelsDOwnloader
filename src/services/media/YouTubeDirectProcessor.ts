@@ -141,16 +141,18 @@ export class YouTubeDirectProcessor {
       const extracted = await this.fetchVideoInfo(id);
       return this.toResolutionResult(extracted);
     } catch (error) {
-      if (error instanceof YouTubeDirectError) throw error;
+      // yt-dlp failed (binary missing on serverless, timeout, etc.):
+      // fall back to YouTube's public oEmbed API for title/thumbnail/duration.
+      // oEmbed does not provide direct media URLs, so downloads are unsupported
+      // in this path - but metadata still lets the UI show the video info.
+      const originalError =
+        error instanceof YouTubeDirectError ? error : new YouTubeDirectError('YTDLP_ERROR', String(error));
 
-      // Fall back to oEmbed if yt-dlp fails
       try {
         const extracted = await this.fetchVideoInfoOembed(id);
         return this.toResolutionResultOembed(id, extracted);
       } catch {
-        throw error instanceof YouTubeDirectError
-          ? error
-          : new YouTubeDirectError('YTDLP_ERROR', `Failed to extract YouTube video info: ${error}`);
+        throw originalError;
       }
     }
   }

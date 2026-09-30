@@ -320,6 +320,22 @@ export class MediaResolver {
         return this.createError(explicitCode, this.userFacingMessage(explicitCode, error.message));
       }
 
+      // Handle YouTube provider-specific error codes that aren't in ERROR_STATUS_MAP.
+      // These come from yt-dlp failures and are mapped to user-facing errors.
+      const ytDlpCode = explicitCode as string | undefined;
+      if (ytDlpCode === 'YTDLP_NOT_FOUND') {
+        return this.createError(
+          'INTERNAL_ERROR',
+          'Download backend is not fully configured; metadata was fetched via the public oEmbed fallback'
+        );
+      }
+      if (ytDlpCode === 'YTDLP_ERROR') {
+        return this.createError(
+          'MEDIA_UNAVAILABLE',
+          'Failed to extract video information from YouTube'
+        );
+      }
+
       const message = error.message;
 
       if (message.includes('NOT_FOUND') || message.includes('404')) {
