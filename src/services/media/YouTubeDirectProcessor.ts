@@ -146,7 +146,9 @@ export class YouTubeDirectProcessor {
       // oEmbed does not provide direct media URLs, so downloads are unsupported
       // in this path - but metadata still lets the UI show the video info.
       const originalError =
-        error instanceof YouTubeDirectError ? error : new YouTubeDirectError('YTDLP_ERROR', String(error));
+        error instanceof YouTubeDirectError
+          ? error
+          : new YouTubeDirectError('YTDLP_ERROR', String(error));
 
       try {
         const extracted = await this.fetchVideoInfoOembed(id);
