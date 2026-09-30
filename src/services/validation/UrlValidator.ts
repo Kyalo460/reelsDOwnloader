@@ -32,6 +32,25 @@ function bareHostname(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
+/** Try to parse URL with generic parser to get hostname for domain check. */
+function parseUrlForHostname(input: string): URL | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Handle bare domains and protocol-relative URLs
+  const absolute = /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
+    ? trimmed
+    : trimmed.startsWith('//')
+      ? `https:${trimmed}`
+      : `https://${trimmed}`;
+
+  try {
+    return new URL(absolute);
+  } catch {
+    return null;
+  }
+}
+
 export class UrlValidator {
   private readonly maxUrlLength = 2048;
 
@@ -51,31 +70,20 @@ export class UrlValidator {
       );
     }
 
-    // Try Instagram first
-    let parsed = normalizeInstagramUrl(trimmed);
-    let media: InstagramMediaRef | YouTubeMediaRef | null = parsed
-      ? parseInstagramMediaUrl(trimmed)
-      : null;
-    let isInstagram = true;
-
-    if (!media) {
-      // Try YouTube
-      parsed = normalizeYouTubeUrl(trimmed);
-      media = parsed ? parseYouTubeUrl(trimmed) : null;
-      isInstagram = false;
-    }
-
-    if (!parsed || !media) {
+    // First, try to parse URL to get hostname for domain check
+    const parsedUrl = parseUrlForHostname(trimmed);
+    if (!parsedUrl) {
       return this.error('INVALID_URL', 'Invalid URL format');
     }
 
-    // We always request the page ourselves, so never downgrade to plaintext.
-    if (parsed.protocol !== 'https:') {
+    const hostname = bareHostname(parsedUrl.hostname).toLowerCase();
+
+    // Check protocol
+    if (parsedUrl.protocol !== 'https:') {
       return this.error('INVALID_URL', 'Only HTTPS URLs are allowed');
     }
 
     // Check blocked hosts (before domain check)
-    const hostname = bareHostname(parsed.hostname).toLowerCase();
     if (
       BLOCKED_HOSTS.includes(hostname) ||
       PRIVATE_IP_RANGES.some((range) => range.test(hostname))
@@ -83,15 +91,31 @@ export class UrlValidator {
       return this.error('NOT_PERMITTED', 'Access to local resources is not permitted');
     }
 
-    // Check domain
-    if (isInstagram) {
-      if (!isInstagramHostname(hostname)) {
-        return this.error('UNSUPPORTED_URL', 'Only Instagram and YouTube URLs are supported');
-      }
+    // Check if it's a supported domain
+    const isInstagramDomain = isInstagramHostname(hostname);
+    const isYouTubeDomain = isYouTubeHostname(hostname);
+
+    if (!isInstagramDomain && !isYouTubeDomain) {
+      return this.error('UNSUPPORTED_URL', 'Only Instagram and YouTube URLs are supported');
+    }
+
+    // Now try to parse the specific media format using platform-specific normalizers
+    let parsed: URL | null = null;
+    let media: InstagramMediaRef | YouTubeMediaRef | null = null;
+    let isInstagram = false;
+
+    if (isInstagramDomain) {
+      parsed = normalizeInstagramUrl(trimmed);
+      media = parsed ? parseInstagramMediaUrl(trimmed) : null;
+      isInstagram = true;
     } else {
-      if (!isYouTubeHostname(hostname)) {
-        return this.error('UNSUPPORTED_URL', 'Only Instagram and YouTube URLs are supported');
-      }
+      parsed = normalizeYouTubeUrl(trimmed);
+      media = parsed ? parseYouTubeUrl(trimmed) : null;
+      isInstagram = false;
+    }
+
+    if (!parsed || !media) {
+      return this.error('INVALID_URL', 'Invalid URL format');
     }
 
     const shortCode = isInstagram

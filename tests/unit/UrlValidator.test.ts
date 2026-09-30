@@ -75,10 +75,9 @@ describe('UrlValidator', () => {
       expect(result.error?.code).toBe('INVALID_URL');
     });
 
-    it('should reject non-Instagram domains', () => {
+    it('should reject non-supported domains', () => {
       const invalidUrls = [
         'https://www.facebook.com/reel/ABC123/',
-        'https://www.youtube.com/watch?v=ABC123',
         'https://example.com/reel/ABC123/',
         'https://evil.com/reel/ABC123/',
       ];
@@ -87,6 +86,21 @@ describe('UrlValidator', () => {
         const result = urlValidator.validate(url);
         expect(result.valid).toBe(false);
         expect(result.error?.code).toBe('UNSUPPORTED_URL');
+      }
+    });
+
+    it('should accept valid YouTube URLs', () => {
+      const validUrls = [
+        'https://www.youtube.com/watch?v=ABC12345678',
+        'https://youtu.be/ABC12345678',
+        'https://www.youtube.com/shorts/ABC12345678',
+        'https://youtube.com/watch?v=ABC12345678',
+      ];
+
+      for (const url of validUrls) {
+        const result = urlValidator.validate(url);
+        expect(result.valid, url).toBe(true);
+        expect(result.shortCode).toBeDefined();
       }
     });
 

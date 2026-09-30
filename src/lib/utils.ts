@@ -3,6 +3,11 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { extractShortCodeFromInstagramUrl, isInstagramMediaUrl } from '@/lib/instagramUrl';
+import { isYouTubeUrl, extractVideoId, getYouTubeThumbnailUrl } from '@/lib/youtubeUrl';
+
+// Re-export YouTube URL helpers
+export { isYouTubeUrl, extractVideoId, getYouTubeThumbnailUrl };
+export type { Platform } from '@/components/UrlInput';
 import { isYouTubeHostname } from '@/lib/youtubeUrl';
 
 export function cn(...inputs: ClassValue[]) {

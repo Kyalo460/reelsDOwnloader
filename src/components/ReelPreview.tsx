@@ -5,7 +5,7 @@
 import { useState, useRef } from 'react';
 import { Download, Play, ExternalLink, X, Loader2, AlertCircle } from 'lucide-react';
 import { cn, formatDuration, formatBytes } from '@/lib/utils';
-import type { MediaVariant } from '@/types';
+import type { MediaVariant, Platform } from '@/types';
 
 interface ReelPreviewProps {
   title: string;
@@ -13,6 +13,7 @@ interface ReelPreviewProps {
   duration: number;
   media: MediaVariant[];
   shortCode: string;
+  platform: Platform;
   onDownload: (quality: string) => void;
   isDownloading?: string | null;
   error?: string;
@@ -24,6 +25,7 @@ export function ReelPreview({
   duration,
   media,
   shortCode,
+  platform,
   onDownload,
   isDownloading,
   error,
