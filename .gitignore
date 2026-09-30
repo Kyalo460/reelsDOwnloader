@@ -63,3 +63,5 @@ test-results/
 # Docker
 docker-compose.override.yml
 .vercel
+
+.env*
