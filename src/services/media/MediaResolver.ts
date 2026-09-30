@@ -261,7 +261,7 @@ export class MediaResolver {
       // code, which is more reliable than matching on message text.
       const explicitCode = (error as Error & { code?: ErrorCode }).code;
       if (explicitCode && explicitCode in ERROR_STATUS_MAP) {
-        return this.createError(explicitCode, error.message);
+        return this.createError(explicitCode, this.userFacingMessage(explicitCode, error.message));
       }
 
       const message = error.message;
@@ -278,12 +278,45 @@ export class MediaResolver {
       if (message.includes('NOT_PERMITTED') || message.includes('not permitted')) {
         return this.createError('NOT_PERMITTED', 'This content cannot be downloaded');
       }
+      if (message.includes('AUTH_REQUIRED')) {
+        return this.createError(
+          'AUTH_REQUIRED',
+          'Instagram requires a signed-in session to serve this reel'
+        );
+      }
       if (message.includes('MEDIA_UNAVAILABLE') || message.includes('unavailable')) {
         return this.createError('MEDIA_UNAVAILABLE', 'Media is not available for download');
       }
     }
 
     return this.createError('INTERNAL_ERROR', 'Failed to resolve media');
+  }
+
+  /**
+   * Providers prefix their messages with the error code (`NOT_FOUND - …`) so
+   * string matching keeps working. That prefix is an implementation detail and
+   * must never reach the UI, so it is stripped and replaced with wording that
+   * tells the user what actually happened.
+   */
+  private userFacingMessage(code: ErrorCode, rawMessage: string): string {
+    const message = rawMessage.replace(/^[A-Z_]+\s*-\s*/, '').trim();
+
+    switch (code) {
+      case 'AUTH_REQUIRED':
+        return 'This reel exists, but Instagram only serves its video to a signed-in session, so it cannot be downloaded anonymously.';
+      case 'NOT_FOUND':
+        return 'Reel not found or has been deleted';
+      case 'PRIVATE_CONTENT':
+        return 'This content is from a private account';
+      case 'RATE_LIMITED':
+        return 'Too many requests. Please try again later';
+      case 'NOT_PERMITTED':
+        return 'This content cannot be downloaded';
+      case 'MEDIA_UNAVAILABLE':
+        return 'Media is not available for download';
+      default:
+        return message || 'Failed to resolve media';
+    }
   }
 
   async invalidateCache(shortCode: string): Promise<void> {

@@ -43,6 +43,12 @@ const errorCodes = [
   },
   { status: '404', code: 'NOT_FOUND', description: 'The Reel was not found or has been deleted.' },
   {
+    status: '401',
+    code: 'AUTH_REQUIRED',
+    description:
+      'The Reel exists, but Instagram only serves its video file to a signed-in session.',
+  },
+  {
     status: '404',
     code: 'MEDIA_UNAVAILABLE',
     description: 'The media could not be located or accessed.',

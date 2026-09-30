@@ -42,6 +42,35 @@ const IMAGE_ONLY_PAGE = String.raw`<html><head><meta property="og:image" content
 
 const EMPTY_PAGE = '<html><head><title>Instagram</title></head><body></body></html>';
 
+/**
+ * The real response shape that triggered the false "reel not found or has been
+ * deleted" error: Instagram returns HTTP 200 and the reel's genuine public
+ * metadata (caption, cover image, canonical URL) but no `og:video` and no
+ * `video_versions`, because the video file is only served to a signed-in
+ * session. The reel exists; only the media URL is withheld.
+ */
+const EXISTS_BUT_NO_VIDEO_PAGE = String.raw`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Daybreak Animations (@daybreakanimations) • Instagram reel</title>
+    <meta property="og:title" content="Daybreak Animations on Instagram: &quot;Pov: when old people see trans Women&quot;" />
+    <meta property="og:description" content="246K likes, 7,175 comments - daybreakanimations on April 12, 2026" />
+    <meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg" />
+    <link rel="canonical" href="https://www.instagram.com/reel/ABC123/" />
+  </head>
+  <body></body>
+</html>`;
+
+/**
+ * The logged-out login wall: HTTP 200, a full ~635 KB app shell, and not a
+ * single reel-specific tag. It must never be read as proof the reel exists.
+ */
+const LOGIN_WALL_SHELL_PAGE = String.raw`<!DOCTYPE html>
+<html class="_9dls _ar44" lang="en">
+  <head><title>Instagram</title></head>
+  <body><div id="app"></div></body>
+</html>`;
+
 const EMBED_PAGE = String.raw`<html><body><video src="https:\/\/scontent.cdninstagram.com\/v\/t50\/reel-480.mp4"></video><script>{"video_url":"https:\/\/scontent.cdninstagram.com\/v\/t50\/reel-480.mp4"}</script></body></html>`;
 
 const JSON_VIEW = JSON.stringify({
@@ -239,36 +268,26 @@ describe('DirectUrlProcessor', () => {
       expect(requestedUrls(fetchImpl)).toEqual(['https://www.instagram.com/p/ABC123/']);
     });
 
-    it('falls back to the public JSON view when the page has no media', async () => {
+    it('falls back to the public embed page when the page has no media', async () => {
       const fetchImpl = vi
         .fn()
-        .mockResolvedValueOnce(htmlResponse(EMPTY_PAGE))
-        .mockResolvedValueOnce(jsonResponse(JSON_VIEW));
-
-      const result = await new DirectUrlProcessor({ fetchImpl }).process(REEL_URL);
-
-      expect(requestedUrls(fetchImpl)).toEqual([REEL_URL, `${REEL_URL}?__a=1&__d=dis`]);
-      expect(result.media[0]?.width).toBe(720);
-      expect(result.media[1]?.width).toBe(480);
-    });
-
-    it('falls back to the public embed page as a last resort', async () => {
-      const fetchImpl = vi
-        .fn()
-        .mockResolvedValueOnce(htmlResponse(EMPTY_PAGE))
         .mockResolvedValueOnce(htmlResponse(EMPTY_PAGE))
         .mockResolvedValueOnce(htmlResponse(EMBED_PAGE));
 
       const result = await new DirectUrlProcessor({ fetchImpl }).process(REEL_URL);
 
-      expect(requestedUrls(fetchImpl)).toEqual([
-        REEL_URL,
-        `${REEL_URL}?__a=1&__d=dis`,
-        `${REEL_URL}embed/captioned/`,
-      ]);
+      expect(requestedUrls(fetchImpl)).toEqual([REEL_URL, `${REEL_URL}embed/captioned/`]);
       expect(result.media[0]?.sourceUrl).toBe(
         'https://scontent.cdninstagram.com/v/t50/reel-480.mp4'
       );
+    });
+
+    it('never requests the removed ?__a=1 JSON view, which 404s for every reel', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(htmlResponse(REEL_PAGE_HTML));
+
+      await new DirectUrlProcessor({ fetchImpl }).process(REEL_URL);
+
+      expect(requestedUrls(fetchImpl).some((url) => url.includes('__a=1'))).toBe(false);
     });
 
     it('reports private content', async () => {
@@ -285,6 +304,53 @@ describe('DirectUrlProcessor', () => {
       await expect(new DirectUrlProcessor({ fetchImpl }).process(REEL_URL)).rejects.toThrow(
         /NOT_FOUND/
       );
+    });
+
+    // Regression: a live reel whose video file is withheld used to be reported
+    // as "Reel not found or has been deleted", which is factually wrong.
+    it('reports AUTH_REQUIRED, not NOT_FOUND, when the reel exists but has no video', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(htmlResponse(EXISTS_BUT_NO_VIDEO_PAGE));
+
+      const error = await new DirectUrlProcessor({ fetchImpl })
+        .process(REEL_URL)
+        .catch((e: Error) => e);
+
+      expect((error as Error & { code?: string }).code).toBe('AUTH_REQUIRED');
+      expect((error as Error).message).not.toMatch(/NOT_FOUND/);
+    });
+
+    it('recognises an existing reel from its metadata even without a media URL', () => {
+      const extracted = extractFromHtml(EXISTS_BUT_NO_VIDEO_PAGE, SHORT_CODE);
+
+      expect(extracted.exists).toBe(true);
+      expect(extracted.notFound).toBe(false);
+      expect(extracted.mediaUrl).toBeUndefined();
+    });
+
+    it('does not treat the logged-out login wall as an existing reel', () => {
+      const extracted = extractFromHtml(LOGIN_WALL_SHELL_PAGE, SHORT_CODE);
+
+      expect(extracted.exists).toBe(false);
+    });
+
+    it('does not treat a generic Instagram title as proof a reel exists', () => {
+      const generic = String.raw`<html><head>
+        <meta property="og:title" content="Instagram" />
+        <meta property="og:description" content="246K likes" />
+        <link rel="canonical" href="https://www.instagram.com/reel/ABC123/" />
+      </head><body></body></html>`;
+
+      expect(extractFromHtml(generic, SHORT_CODE).exists).toBe(false);
+    });
+
+    it('ignores metadata that belongs to a different reel', () => {
+      const otherReel = String.raw`<html><head>
+        <meta property="og:title" content="Someone Else on Instagram" />
+        <meta property="og:description" content="999 likes" />
+        <link rel="canonical" href="https://www.instagram.com/reel/ZZZZZZ/" />
+      </head><body></body></html>`;
+
+      expect(extractFromHtml(otherReel, SHORT_CODE).exists).toBe(false);
     });
 
     it('reports a login wall', async () => {

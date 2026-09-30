@@ -71,6 +71,7 @@ export type ErrorCode =
   | 'MEDIA_UNAVAILABLE'
   | 'RATE_LIMITED'
   | 'NOT_PERMITTED'
+  | 'AUTH_REQUIRED'
   | 'INTERNAL_ERROR';
 
 export const ERROR_STATUS_MAP: Record<ErrorCode, number> = {
@@ -81,6 +82,9 @@ export const ERROR_STATUS_MAP: Record<ErrorCode, number> = {
   MEDIA_UNAVAILABLE: 404,
   RATE_LIMITED: 429,
   NOT_PERMITTED: 451,
+  // The reel is public but Instagram only serves the video file to a signed-in
+  // session. This is distinct from NOT_FOUND, which claims the reel is gone.
+  AUTH_REQUIRED: 401,
   INTERNAL_ERROR: 500,
 };
 

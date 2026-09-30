@@ -17,7 +17,8 @@ export type DirectUrlErrorCode =
   | 'PRIVATE_CONTENT'
   | 'MEDIA_UNAVAILABLE'
   | 'RATE_LIMITED'
-  | 'NOT_PERMITTED';
+  | 'NOT_PERMITTED'
+  | 'AUTH_REQUIRED';
 
 /**
  * Error type used by the processor. The message is prefixed with the error code
@@ -37,6 +38,21 @@ export const INSTAGRAM_ORIGIN = 'https://www.instagram.com';
 
 export const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/**
+ * Instagram serves logged-out visitors a JavaScript login wall instead of the
+ * page body: a ~635 KB app shell with no `og:*` tags, no caption and no media.
+ * A reel fetched with a plain browser User-Agent is therefore indistinguishable
+ * from a deleted one, which is what produced the bogus "reel not found or has
+ * been deleted" error.
+ *
+ * Identifying the request as the mobile app makes Instagram return the same
+ * public SEO metadata any crawler receives (og:title, og:description,
+ * og:image). The browser prefix is kept so Instagram's CDN and bot checks,
+ * which expect a browser-shaped User-Agent, still see one.
+ */
+export const INSTAGRAM_APP_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2340; Google/google; Pixel 6; oriole; oriole; en_US; 458229257)';
 
 const SHORT_CODE_PATTERN = /\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/;
 const QUALITY_TIERS: MediaVariant['quality'][] = ['original', 'hd', 'sd'];
@@ -62,6 +78,13 @@ export interface ExtractedMedia {
   isPrivate: boolean;
   requiresLogin: boolean;
   notFound: boolean;
+  /**
+   * True when Instagram returned real metadata describing this specific reel
+   * (og:title/og:description naming the account and caption). A page that
+   * exists but exposes no metadata is a login wall, NOT a deleted reel, so
+   * this flag is what keeps the two apart.
+   */
+  exists: boolean;
   ownerUsername?: string;
 }
 
@@ -220,6 +243,45 @@ const PRIVATE_PATTERN = /"is_private"\s*:\s*true|this account is private/i;
 const LOGIN_WALL_PATTERN = /"require_login"\s*:\s*true|<title>[^<]*log in[^<]*<\/title>/i;
 
 /**
+ * Titles Instagram serves for its own logged-out shell and for genuinely
+ * missing content. They describe the site, not the reel, so they are not
+ * evidence that a reel exists.
+ */
+const GENERIC_TITLES = new Set(['instagram', 'instagram reel', 'page not found • instagram']);
+
+/**
+ * Decides whether a response proves the reel exists.
+ *
+ * Requires two independent signals so a login wall can never be mistaken for a
+ * live reel: Instagram must publish a reel-specific Open Graph description, and
+ * the page must be scoped to the requested shortcode. Verified behaviour:
+ * a real reel yields og:title + og:description + og:image; the login wall and a
+ * nonexistent shortcode yield none of them.
+ */
+function hasReelMetadata(
+  html: string,
+  ogTitle: string | undefined,
+  ogDescription: string | undefined,
+  ogImage: string | undefined,
+  shortCode: string
+): boolean {
+  const title = ogTitle?.trim();
+  if (!title || GENERIC_TITLES.has(title.toLowerCase())) return false;
+
+  // The canonical/og:url must point back at the exact reel we asked for.
+  // Instagram writes these URLs both verbatim (`https://…`) and slash-escaped
+  // inside embedded JSON (`https:\/\/…`), so both forms are accepted.
+  const scopedToReel = new RegExp(
+    `https?:(?:\\\\?/){2}(?:www\\.)?instagram\\.com(?:\\\\?/)[^"']*?/${escapeRegExp(shortCode)}`,
+    'i'
+  ).test(html);
+  if (!scopedToReel) return false;
+
+  // Real reels always describe themselves and ship a cover image.
+  return Boolean(ogDescription?.trim() || ogImage?.trim());
+}
+
+/**
  * Extracts every signal we care about from a public Instagram page body
  * (or from a JSON payload that has been stringified back to text).
  */
@@ -234,10 +296,18 @@ export function extractFromHtml(html: string, shortCode: string): ExtractedMedia
     /"edge_media_to_caption"\s*:\s*\{\s*"edges"\s*:\s*\[\s*\{\s*"node"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/
   );
   const ogTitle = metaContent(html, 'og:title');
+  const ogDescription = metaContent(html, 'og:description');
+  const ogImage = metaContent(html, 'og:image');
   const duration =
     numberMatch(html, /"video_duration"\s*:\s*([\d.]+)/) ??
     numberMatch(html, /og:video:duration["'][^>]*content=["']([\d.]+)["']/i) ??
     0;
+
+  // Instagram only renders og:title/og:description for a reel that actually
+  // exists. The logged-out login wall omits them entirely, so their presence is
+  // positive proof the reel is live. Instagram's generic shell title ("Instagram")
+  // carries no reel information and must not be treated as proof.
+  const exists = hasReelMetadata(html, ogTitle, ogDescription, ogImage, shortCode);
 
   return {
     shortCode,
@@ -246,7 +316,7 @@ export function extractFromHtml(html: string, shortCode: string): ExtractedMedia
     thumbnail:
       firstMatch(html, /"display_url"\s*:\s*"((?:[^"\\]|\\.)+)"/) ??
       firstMatch(html, /"thumbnail_src"\s*:\s*"((?:[^"\\]|\\.)+)"/) ??
-      metaContent(html, 'og:image'),
+      ogImage,
     title: cleanTitle(caption ?? '') ?? ogTitle ?? titleTag(html),
     duration,
     width: matchedVersion?.width,
@@ -258,6 +328,7 @@ export function extractFromHtml(html: string, shortCode: string): ExtractedMedia
     isPrivate: PRIVATE_PATTERN.test(html),
     requiresLogin: LOGIN_WALL_PATTERN.test(html),
     notFound: NOT_FOUND_PATTERN.test(html),
+    exists,
     ownerUsername: firstMatch(html, /"username"\s*:\s*"([^"]+)"/),
   };
 }
@@ -394,7 +465,6 @@ export class DirectUrlProcessor {
 
     return [
       { url: canonical, kind: 'html' },
-      { url: `${canonical}?__a=1&__d=dis`, kind: 'json' },
       { url: `${canonical}embed/captioned/`, kind: 'html' },
     ];
   }
@@ -420,7 +490,13 @@ export class DirectUrlProcessor {
     }
 
     if (response.status === 404) {
-      throw new DirectUrlError('NOT_FOUND', 'Reel not found or has been deleted');
+      // A 404 from the embed fallback says nothing about the reel itself - the
+      // embed route is unreliable - so it must not outrank a successful read of
+      // the canonical page in pickError().
+      throw new DirectUrlError(
+        'MEDIA_UNAVAILABLE',
+        'Instagram responded with HTTP 404 for this endpoint'
+      );
     }
     if (response.status === 429) {
       throw new DirectUrlError('RATE_LIMITED', 'Instagram is rate limiting requests');
@@ -447,6 +523,18 @@ export class DirectUrlProcessor {
     if (extracted.isPrivate) {
       return new DirectUrlError('PRIVATE_CONTENT', 'This content is from a private account');
     }
+
+    // The reel demonstrably exists - Instagram returned its caption and cover -
+    // but withheld the video file because the request is not signed in.
+    // Reporting NOT_FOUND here was the bug that told users their live reel had
+    // been deleted.
+    if (extracted.exists) {
+      return new DirectUrlError(
+        'AUTH_REQUIRED',
+        'Instagram requires a signed-in session to serve this reel. The reel exists, but its video file is not publicly retrievable'
+      );
+    }
+
     if (extracted.notFound) {
       return new DirectUrlError('NOT_FOUND', 'Reel not found or has been deleted');
     }
@@ -463,10 +551,14 @@ export class DirectUrlProcessor {
   }
 
   private pickError(failures: DirectUrlError[]): DirectUrlError {
+    // Ordered by how confidently each verdict describes the reel. AUTH_REQUIRED
+    // outranks NOT_FOUND because it is backed by proof the reel exists, whereas
+    // NOT_FOUND is inferred from a page that may simply have been withheld.
     const priority: DirectUrlErrorCode[] = [
       'PRIVATE_CONTENT',
-      'NOT_FOUND',
+      'AUTH_REQUIRED',
       'RATE_LIMITED',
+      'NOT_FOUND',
       'NOT_PERMITTED',
       'MEDIA_UNAVAILABLE',
       'INVALID_URL',
@@ -482,7 +574,10 @@ export class DirectUrlProcessor {
 
   private buildHeaders(target: FetchTarget): Record<string, string> {
     return {
-      'User-Agent': BROWSER_USER_AGENT,
+      // The app User-Agent is what makes Instagram return page content instead
+      // of the logged-out login wall. It is the only signal that distinguishes
+      // a real reel from a deleted one.
+      'User-Agent': INSTAGRAM_APP_USER_AGENT,
       Accept:
         target.kind === 'json'
           ? 'application/json, text/plain, */*'
