@@ -2,12 +2,11 @@
 
 'use client';
 
-import type { FormEvent, ClipboardEvent } from 'react';
+import type { FormEvent } from 'react';
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Clipboard, Loader2, AlertCircle, Instagram, Youtube } from 'lucide-react';
 import { cn, isInstagramReelUrl, isYouTubeUrl } from '@/lib/utils';
-
-export type Platform = 'instagram' | 'youtube';
+import type { Platform } from '@/types';
 
 interface UrlInputProps {
   onSubmit: (url: string) => void;

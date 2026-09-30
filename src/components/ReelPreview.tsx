@@ -137,14 +137,18 @@ export function ReelPreview({
         <div className="flex items-center justify-between text-sm text-gray-500 dark:text-gray-400">
           <span className="font-medium text-gray-700 dark:text-gray-300">Available Downloads</span>
           <a
-            href={`https://www.instagram.com/reel/${shortCode}/`}
+            href={
+              platform === 'youtube'
+                ? `https://www.youtube.com/watch?v=${shortCode}`
+                : `https://www.instagram.com/reel/${shortCode}/`
+            }
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-primary-600 transition-colors hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300"
-            aria-label="View on Instagram"
+            aria-label={platform === 'youtube' ? 'View on YouTube' : 'View on Instagram'}
           >
             <ExternalLink className="h-3.5 w-3.5" />
-            View on Instagram
+            {platform === 'youtube' ? 'View on YouTube' : 'View on Instagram'}
           </a>
         </div>
 

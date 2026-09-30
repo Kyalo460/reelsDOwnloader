@@ -38,7 +38,7 @@ export class YouTubeProvider extends BaseMediaProvider {
     return `/api/reels/download/${resolutionId}/${quality}`;
   }
 
-  getMediaRequestHeaders(mediaUrl: string): Record<string, string> {
+  getMediaRequestHeaders(_mediaUrl: string): Record<string, string> {
     return {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',

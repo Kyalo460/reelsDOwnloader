@@ -6,9 +6,9 @@
 import './InstagramProvider';
 // Registers the YouTube provider
 import './YouTubeProvider';
-import { providerRegistry, MediaProvider } from './MediaProvider';
+import { providerRegistry } from './MediaProvider';
 import { resolutionStore } from './resolutionStore';
-import type { MediaResolutionResult, ErrorCode, ValidationResult, Platform } from '@/types';
+import type { MediaResolutionResult, ErrorCode, Platform } from '@/types';
 import { ERROR_STATUS_MAP } from '@/types';
 import { getPrisma } from '@/lib/prisma';
 import { hashString } from '@/lib/utils';
@@ -70,7 +70,11 @@ export class MediaResolver {
         'Invalid URL - only Instagram Reels and YouTube videos are supported'
       );
     }
-    const shortCode = media.shortCode;
+
+    // Use a platform-prefixed key to avoid cache collisions between platforms
+    // that might share a shortcode/space
+    const cacheKey = `${media.platform}_${media.shortCode}`;
+    const shortCode = cacheKey;
     const target = media.url;
 
     // Check memory cache first
@@ -150,18 +154,24 @@ export class MediaResolver {
     this.cache.set(shortCode, cached);
   }
 
-  private async getFromDatabase(shortCode: string): Promise<CachedResolution | null> {
+  private async getFromDatabase(cacheKey: string): Promise<CachedResolution | null> {
     const prisma = getPrisma();
     if (!prisma) return null;
 
-    // The shortCode passed here is the platform-specific shortcode (e.g., "ig_ABC123" or "yt_ABC123")
-    // But the database stores it as just the shortcode. We need to handle this properly.
-    // Since the DB has unique constraint on shortCode, we'll use a composite key.
-    // For backward compatibility, we try both the raw shortCode and prefixed versions.
+    // Map the platform-prefixed cache key back to the provider ID format
+    // stored in the database (e.g., "instagram_ABC123" -> "ig_ABC123",
+    // "youtube_ABC123" -> "yt_ABC123")
+    const dbShortCode = cacheKey.replace(/^instagram_/, 'ig_').replace(/^youtube_/, 'yt_');
 
-    const record = await prisma.reelResolution.findUnique({
-      where: { shortCode },
-    });
+    // Try the platform-specific ID first
+    const record =
+      (await prisma.reelResolution.findUnique({
+        where: { shortCode: dbShortCode },
+      })) ??
+      // Fall back to the raw cache key for backward compatibility
+      (await prisma.reelResolution.findUnique({
+        where: { shortCode: cacheKey },
+      }));
 
     if (!record || record.status !== 'RESOLVED') {
       return null;
@@ -269,7 +279,7 @@ export class MediaResolver {
     shortCode: string,
     options: ResolutionOptions,
     success: boolean,
-    error?: unknown
+    _error?: unknown
   ): Promise<void> {
     const prisma = getPrisma();
     if (!prisma) return;
@@ -365,15 +375,19 @@ export class MediaResolver {
     }
   }
 
-  async invalidateCache(shortCode: string): Promise<void> {
-    this.cache.delete(shortCode);
-    resolutionStore.deleteByShortCode(shortCode);
+  async invalidateCache(cacheKey: string): Promise<void> {
+    this.cache.delete(cacheKey);
+    resolutionStore.deleteByShortCode(
+      cacheKey.replace(/^instagram_/, 'ig_').replace(/^youtube_/, 'yt_')
+    );
 
     const prisma = getPrisma();
     if (!prisma) return;
 
+    const dbShortCode = cacheKey.replace(/^instagram_/, 'ig_').replace(/^youtube_/, 'yt_');
+
     await prisma.reelResolution.updateMany({
-      where: { shortCode },
+      where: { shortCode: dbShortCode },
       data: { status: 'EXPIRED' },
     });
   }

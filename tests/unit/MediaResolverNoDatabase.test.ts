@@ -30,6 +30,7 @@ const resolvedMedia: MediaResolutionResult = {
   thumbnail: 'https://cdn/thumb.jpg',
   duration: 12,
   shortCode: SHORT_CODE,
+  platform: 'instagram',
   media: [
     {
       quality: 'original',

@@ -27,9 +27,6 @@ export class YouTubeDirectError extends Error {
   }
 }
 
-const YOUTUBE_ORIGIN = 'https://www.youtube.com';
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-
 interface YtdlpVideoInfo {
   id: string;
   title: string;
@@ -38,7 +35,6 @@ interface YtdlpVideoInfo {
   formats?: YtdlpFormat[];
   is_live?: boolean;
   availability?: string;
-  age_limit?: number;
 }
 
 interface YtdlpFormat {
@@ -78,17 +74,6 @@ function versionArea(format: YtdlpFormat): number {
 
 function hasVideoTrack(format: YtdlpFormat): boolean {
   return format.vcodec !== 'none' && format.vcodec !== undefined;
-}
-
-function hasAudioTrack(format: YtdlpFormat): boolean {
-  return format.acodec !== 'none' && format.acodec !== undefined;
-}
-
-function formatQuality(format: YtdlpFormat): 'original' | 'hd' | 'sd' {
-  const height = format.height ?? 0;
-  if (height >= 1080) return 'original';
-  if (height >= 720) return 'hd';
-  return 'sd';
 }
 
 function selectBestFormats(formats: YtdlpFormat[]): YtdlpFormat[] {
@@ -163,7 +148,6 @@ export class YouTubeDirectProcessor {
   private extractMedia(info: YtdlpVideoInfo): ExtractedYouTubeMedia {
     const isLive = info.is_live === true;
     const availability = info.availability;
-    const ageLimit = info.age_limit ?? 0;
 
     let requiresAuth = false;
     let isPrivate = false;

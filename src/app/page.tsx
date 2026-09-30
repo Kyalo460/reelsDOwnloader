@@ -10,21 +10,24 @@ import { HowItWorks } from '@/components/HowItWorks';
 import { UrlInput } from '@/components/UrlInput';
 import { ReelPreview } from '@/components/ReelPreview';
 import { AlertCircle, Info } from 'lucide-react';
-import type { MediaResolutionResult } from '@/types';
+import type { MediaResolutionResult, Platform } from '@/types';
 
 export default function HomePage() {
+  const [platform, setPlatform] = useState<Platform>('instagram');
   const [previewData, setPreviewData] = useState<MediaResolutionResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadingQuality, setDownloadingQuality] = useState<string | null>(null);
 
-  const handleUrlDetected = useCallback((url: string) => {
-    // Clear preview and error when a new Instagram URL is detected
+  const handleUrlDetected = useCallback(() => {
+    // Clear preview and error when a new URL is detected
     setPreviewData(null);
     setError(null);
   }, []);
 
   const handleSubmit = useCallback(async (url: string) => {
+    if (!url.trim()) return;
+
     setIsLoading(true);
     setError(null);
     setPreviewData(null);
@@ -39,7 +42,7 @@ export default function HomePage() {
       const data = await response.json();
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error?.message || 'Failed to resolve Reel');
+        throw new Error(data.error?.message || 'Failed to resolve media');
       }
 
       setPreviewData(data.data);
@@ -49,6 +52,12 @@ export default function HomePage() {
     } finally {
       setIsLoading(false);
     }
+  }, []);
+
+  const handlePlatformChange = useCallback((newPlatform: Platform) => {
+    setPlatform(newPlatform);
+    setPreviewData(null);
+    setError(null);
   }, []);
 
   const handleDownload = useCallback(
@@ -64,6 +73,9 @@ export default function HomePage() {
         const response = await fetch(variant.downloadUrl);
 
         if (!response.ok) {
+          if (response.status === 404 || response.status === 410) {
+            throw new Error('Download link expired, please try resolving again');
+          }
           throw new Error('Download failed');
         }
 
@@ -102,11 +114,20 @@ export default function HomePage() {
                 id="hero-heading"
                 className="mb-6 text-4xl font-bold tracking-tight text-gray-900 dark:text-white lg:text-6xl"
               >
-                Download Instagram <span className="gradient-text">Reels</span> Instantly
+                {platform === 'instagram' ? (
+                  <>
+                    Download Instagram <span className="gradient-text">Reels</span> Instantly
+                  </>
+                ) : (
+                  <>
+                    Download YouTube <span className="gradient-text">Videos</span> Instantly
+                  </>
+                )}
               </h1>
               <p className="mx-auto mb-10 max-w-2xl text-lg leading-relaxed text-gray-600 dark:text-gray-400 lg:text-xl">
-                Paste a Reel URL, preview the content, and download in your preferred quality. Fast,
-                secure, and no login required.
+                {platform === 'instagram'
+                  ? 'Paste an Instagram Reel URL, preview the content, and download in your preferred quality. Fast, secure, and no login required.'
+                  : 'Paste a YouTube URL, preview the video, and download in your preferred quality. Fast, secure, and no login required.'}
               </p>
 
               {/* URL Input */}
@@ -115,6 +136,8 @@ export default function HomePage() {
                 onUrlDetected={handleUrlDetected}
                 isLoading={isLoading}
                 error={error ?? undefined}
+                platform={platform}
+                onPlatformChange={handlePlatformChange}
               />
 
               {/* Trust Indicators */}
@@ -156,7 +179,7 @@ export default function HomePage() {
             <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
               <div className="mx-auto max-w-3xl">
                 <h2 id="preview-heading" className="sr-only">
-                  Reel Preview
+                  {platform === 'instagram' ? 'Reel Preview' : 'Video Preview'}
                 </h2>
                 <ReelPreview
                   title={previewData.title}
@@ -164,6 +187,7 @@ export default function HomePage() {
                   duration={previewData.duration}
                   media={previewData.media}
                   shortCode={previewData.shortCode}
+                  platform={previewData.platform ?? platform}
                   onDownload={handleDownload}
                   isDownloading={downloadingQuality}
                   error={error ?? undefined}
@@ -210,7 +234,7 @@ export default function HomePage() {
                 id="cta-heading"
                 className="mb-4 text-3xl font-bold text-gray-900 dark:text-white lg:text-4xl"
               >
-                Ready to download your first Reel?
+                Ready to download your first {platform === 'instagram' ? 'Reel' : 'video'}?
               </h2>
               <p className="mx-auto mb-8 max-w-2xl text-lg text-gray-600 dark:text-gray-400">
                 Paste a URL above and start downloading in seconds. No registration, no limits, no

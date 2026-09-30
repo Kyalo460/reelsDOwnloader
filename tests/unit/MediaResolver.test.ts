@@ -32,6 +32,7 @@ const resolvedMedia: MediaResolutionResult = {
   thumbnail: 'https://cdn/thumb.jpg',
   duration: 12,
   shortCode: SHORT_CODE,
+  platform: 'instagram',
   media: [
     {
       quality: 'original',
@@ -107,7 +108,8 @@ describe('MediaResolver', () => {
 
     it('reuses an existing record id so issued download links keep working', async () => {
       prismaMocks.findUnique
-        .mockResolvedValueOnce(null) // database cache lookup
+        .mockResolvedValueOnce(null) // database cache lookup (ig_FAKE123)
+        .mockResolvedValueOnce(null) // database cache lookup fallback (instagram_FAKE123)
         .mockResolvedValueOnce({ id: 'existing_cuid' }); // persistResolution lookup
 
       const resolver = new MediaResolver();

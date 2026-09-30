@@ -3,12 +3,15 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { extractShortCodeFromInstagramUrl, isInstagramMediaUrl } from '@/lib/instagramUrl';
-import { isYouTubeUrl, extractVideoId, getYouTubeThumbnailUrl } from '@/lib/youtubeUrl';
+import {
+  isYouTubeHostname,
+  normalizeYouTubeUrl,
+  parseYouTubeUrl,
+  getYouTubeThumbnailUrl,
+} from '@/lib/youtubeUrl';
 
 // Re-export YouTube URL helpers
-export { isYouTubeUrl, extractVideoId, getYouTubeThumbnailUrl };
-export type { Platform } from '@/components/UrlInput';
-import { isYouTubeHostname } from '@/lib/youtubeUrl';
+export { isYouTubeHostname, normalizeYouTubeUrl, parseYouTubeUrl, getYouTubeThumbnailUrl };
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -149,12 +152,11 @@ export function isInstagramReelUrl(url: string): boolean {
 }
 
 export function isYouTubeUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return isYouTubeHostname(parsed.hostname);
-  } catch {
-    return false;
-  }
+  return parseYouTubeUrl(url) !== null;
+}
+
+export function extractVideoId(url: string): string | undefined {
+  return parseYouTubeUrl(url)?.videoId;
 }
 
 export function extractShortCode(url: string): string | undefined {

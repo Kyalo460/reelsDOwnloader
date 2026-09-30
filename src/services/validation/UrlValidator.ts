@@ -136,9 +136,6 @@ export class UrlValidator {
     }
 
     try {
-      const parsed = new URL(url);
-      const hostname = parsed.hostname;
-
       // In a real implementation, you'd do DNS resolution here
       // For now, we skip actual DNS resolution to avoid SSRF risk
       // But you could use a safe DNS resolver library
