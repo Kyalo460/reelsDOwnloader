@@ -311,9 +311,9 @@ export function isInternalApiUrl(url: string): boolean {
   }
 }
 
-/** `ig_ABC123` -> `ABC123`, so legacy provider ids still resolve. */
+/** `ig_ABC123` -> `ABC123`, `yt_ABC123` -> `ABC123`, so legacy provider ids still resolve. */
 export function shortCodeFromResolutionId(resolutionId: string): string | null {
-  const match = /^ig_([A-Za-z0-9_-]+)$/.exec(resolutionId);
+  const match = /^(?:ig|yt)_([A-Za-z0-9_-]+)$/.exec(resolutionId);
   return match?.[1] ?? null;
 }
 

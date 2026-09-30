@@ -54,7 +54,7 @@ logs/
 *.log
 
 # Prisma
-prisma/migrations/
+# Migrations MUST be committed: `prisma migrate deploy` on a fresh DB (Neon) is what creates the tables.
 
 # Test artifacts
 playwright-report/

@@ -1,5 +1,7 @@
 // Core TypeScript Types
 
+export type Platform = 'instagram' | 'youtube';
+
 export interface MediaVariant {
   quality: 'original' | 'hd' | 'sd';
   format: 'mp4' | 'webm';
@@ -27,6 +29,7 @@ export interface MediaResolutionResult {
   duration: number; // seconds
   media: MediaVariant[];
   shortCode: string;
+  platform: Platform;
 }
 
 export interface ValidationResult {

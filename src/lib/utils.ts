@@ -3,6 +3,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { extractShortCodeFromInstagramUrl, isInstagramMediaUrl } from '@/lib/instagramUrl';
+import { isYouTubeHostname } from '@/lib/youtubeUrl';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -140,6 +141,15 @@ export function getDomain(url: string): string {
 
 export function isInstagramReelUrl(url: string): boolean {
   return isInstagramMediaUrl(url);
+}
+
+export function isYouTubeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return isYouTubeHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function extractShortCode(url: string): string | undefined {

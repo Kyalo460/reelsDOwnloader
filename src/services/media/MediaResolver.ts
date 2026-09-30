@@ -4,13 +4,16 @@
 // import on purpose: without it the registry stays empty at runtime and every
 // URL is rejected as UNSUPPORTED_URL.
 import './InstagramProvider';
+// Registers the YouTube provider
+import './YouTubeProvider';
 import { providerRegistry, MediaProvider } from './MediaProvider';
 import { resolutionStore } from './resolutionStore';
-import type { MediaResolutionResult, ErrorCode, ValidationResult } from '@/types';
+import type { MediaResolutionResult, ErrorCode, ValidationResult, Platform } from '@/types';
 import { ERROR_STATUS_MAP } from '@/types';
 import { getPrisma } from '@/lib/prisma';
 import { hashString } from '@/lib/utils';
 import { parseInstagramMediaUrl } from '@/lib/instagramUrl';
+import { parseYouTubeUrl } from '@/lib/youtubeUrl';
 
 export interface ResolutionOptions {
   ipAddress: string;
@@ -23,6 +26,36 @@ export interface CachedResolution {
   expiresAt: Date;
 }
 
+interface ParsedMedia {
+  shortCode: string;
+  url: string;
+  platform: Platform;
+}
+
+function parseMediaUrl(url: string): ParsedMedia | null {
+  // Try Instagram first
+  const instagram = parseInstagramMediaUrl(url);
+  if (instagram) {
+    return {
+      shortCode: instagram.shortCode,
+      url: instagram.url,
+      platform: 'instagram',
+    };
+  }
+
+  // Try YouTube
+  const youtube = parseYouTubeUrl(url);
+  if (youtube) {
+    return {
+      shortCode: youtube.videoId,
+      url: youtube.url,
+      platform: 'youtube',
+    };
+  }
+
+  return null;
+}
+
 export class MediaResolver {
   private cache: Map<string, CachedResolution> = new Map();
   private readonly cacheTtl = 1800000; // 30 minutes
@@ -30,9 +63,12 @@ export class MediaResolver {
   async resolve(url: string, options: ResolutionOptions): Promise<MediaResolutionResult> {
     // Normalise once here so the cache key, provider lookup, validation and
     // page fetch all agree, no matter how the URL was pasted.
-    const media = parseInstagramMediaUrl(url);
+    const media = parseMediaUrl(url);
     if (!media) {
-      throw this.createError('INVALID_URL', 'Invalid Instagram Reel URL');
+      throw this.createError(
+        'INVALID_URL',
+        'Invalid URL - only Instagram Reels and YouTube videos are supported'
+      );
     }
     const shortCode = media.shortCode;
     const target = media.url;
@@ -118,6 +154,11 @@ export class MediaResolver {
     const prisma = getPrisma();
     if (!prisma) return null;
 
+    // The shortCode passed here is the platform-specific shortcode (e.g., "ig_ABC123" or "yt_ABC123")
+    // But the database stores it as just the shortcode. We need to handle this properly.
+    // Since the DB has unique constraint on shortCode, we'll use a composite key.
+    // For backward compatibility, we try both the raw shortCode and prefixed versions.
+
     const record = await prisma.reelResolution.findUnique({
       where: { shortCode },
     });
@@ -141,6 +182,7 @@ export class MediaResolver {
         duration: record.duration || 0,
         media,
         shortCode: record.shortCode,
+        platform: (record.id.startsWith('yt_') ? 'youtube' : 'instagram') as Platform,
       },
       expiresAt: record.expiresAt,
     };
@@ -154,11 +196,15 @@ export class MediaResolver {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
     const prisma = getPrisma();
 
+    // Use the provider's id (which includes platform prefix like `ig_` or `yt_`)
+    // as the database shortCode to avoid conflicts between platforms.
+    const dbShortCode = result.id;
+
     // Reuse the existing record id (links already handed out keep working),
-    // otherwise adopt the provider id (`ig_<shortcode>`).
+    // otherwise adopt the provider id.
     const existing = prisma
       ? await prisma.reelResolution.findUnique({
-          where: { shortCode: result.shortCode },
+          where: { shortCode: dbShortCode },
           select: { id: true },
         })
       : null;
@@ -187,7 +233,7 @@ export class MediaResolver {
     }
 
     await prisma.reelResolution.upsert({
-      where: { shortCode: result.shortCode },
+      where: { shortCode: dbShortCode },
       update: {
         title: result.title,
         thumbnailUrl: result.thumbnail,
@@ -202,7 +248,7 @@ export class MediaResolver {
       create: {
         id: resolutionId,
         url: originalUrl,
-        shortCode: result.shortCode,
+        shortCode: dbShortCode,
         title: result.title,
         thumbnailUrl: result.thumbnail,
         duration: result.duration,
@@ -214,8 +260,8 @@ export class MediaResolver {
       },
     });
 
-    // The id is deterministic (`ig_<shortcode>`) or the id of the record that
-    // already existed, so the media URLs we just stored stay resolvable.
+    // The id is deterministic (`ig_<shortcode>` or `yt_<videoId>`) or the id of the record
+    // that already existed, so the media URLs we just stored stay resolvable.
     return { id: resolutionId, media };
   }
 

@@ -18,6 +18,12 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [downloadingQuality, setDownloadingQuality] = useState<string | null>(null);
 
+  const handleUrlDetected = useCallback((url: string) => {
+    // Clear preview and error when a new Instagram URL is detected
+    setPreviewData(null);
+    setError(null);
+  }, []);
+
   const handleSubmit = useCallback(async (url: string) => {
     setIsLoading(true);
     setError(null);
@@ -104,7 +110,12 @@ export default function HomePage() {
               </p>
 
               {/* URL Input */}
-              <UrlInput onSubmit={handleSubmit} isLoading={isLoading} error={error ?? undefined} />
+              <UrlInput
+                onSubmit={handleSubmit}
+                onUrlDetected={handleUrlDetected}
+                isLoading={isLoading}
+                error={error ?? undefined}
+              />
 
               {/* Trust Indicators */}
               <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-sm text-gray-500 dark:text-gray-400">

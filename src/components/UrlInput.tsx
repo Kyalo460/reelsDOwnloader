@@ -2,19 +2,47 @@
 
 'use client';
 
-import type { FormEvent } from 'react';
-import { useState, useRef, useCallback } from 'react';
-import { Clipboard, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import type { FormEvent, ClipboardEvent } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { Clipboard, Loader2, AlertCircle, Instagram, Youtube } from 'lucide-react';
+import { cn, isInstagramReelUrl, isYouTubeUrl } from '@/lib/utils';
+
+export type Platform = 'instagram' | 'youtube';
 
 interface UrlInputProps {
   onSubmit: (url: string) => void;
+  onUrlDetected?: (url: string) => void;
   isLoading?: boolean;
   error?: string;
   disabled?: boolean;
+  platform?: Platform;
+  onPlatformChange?: (platform: Platform) => void;
 }
 
-export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps) {
+const PLACEHOLDERS: Record<Platform, string> = {
+  instagram: 'https://www.instagram.com/reel/ABC123/',
+  youtube: 'https://www.youtube.com/watch?v=ABC123DEF',
+};
+
+const HINTS: Record<Platform, string> = {
+  instagram: 'Paste an Instagram Reel URL (e.g., instagram.com/reel/ABC123/)',
+  youtube: 'Paste a YouTube URL (e.g., youtube.com/watch?v=ABC123 or youtu.be/ABC123)',
+};
+
+const ICONS: Record<Platform, React.ReactNode> = {
+  instagram: <Instagram className="h-5 w-5" />,
+  youtube: <Youtube className="h-5 w-5" />,
+};
+
+export function UrlInput({
+  onSubmit,
+  onUrlDetected,
+  isLoading,
+  error,
+  disabled,
+  platform = 'instagram',
+  onPlatformChange,
+}: UrlInputProps) {
   const [url, setUrl] = useState('');
   const [showPaste, setShowPaste] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -23,14 +51,65 @@ export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps
     try {
       const text = await navigator.clipboard.readText();
       if (text) {
-        setUrl(text.trim());
+        const trimmed = text.trim();
+        setUrl(trimmed);
         setShowPaste(false);
         inputRef.current?.focus();
+        const isValid =
+          platform === 'instagram' ? isInstagramReelUrl(trimmed) : isYouTubeUrl(trimmed);
+        if (isValid && onUrlDetected) {
+          onUrlDetected(trimmed);
+        }
       }
     } catch {
       // Clipboard access denied
     }
-  }, []);
+  }, [onUrlDetected, platform]);
+
+  const handleInputPaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLInputElement>) => {
+      e.preventDefault();
+      try {
+        const text = e.clipboardData.getData('text');
+        if (text) {
+          const trimmed = text.trim();
+          setUrl(trimmed);
+          setShowPaste(false);
+          const isValid =
+            platform === 'instagram' ? isInstagramReelUrl(trimmed) : isYouTubeUrl(trimmed);
+          if (isValid && onUrlDetected) {
+            onUrlDetected(trimmed);
+          }
+        }
+      } catch {
+        // Clipboard access denied
+      }
+    },
+    [onUrlDetected, platform]
+  );
+
+  useEffect(() => {
+    const checkClipboard = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const trimmed = text.trim();
+          const isValid =
+            platform === 'instagram' ? isInstagramReelUrl(trimmed) : isYouTubeUrl(trimmed);
+          if (isValid) {
+            setUrl(trimmed);
+            setShowPaste(false);
+            if (onUrlDetected) {
+              onUrlDetected(trimmed);
+            }
+          }
+        }
+      } catch {
+        // Clipboard access denied or not available
+      }
+    };
+    checkClipboard();
+  }, [onUrlDetected, platform]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -47,16 +126,56 @@ export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps
 
   const isValidUrl = url.trim().length > 0;
 
+  const handlePlatformChange = (newPlatform: Platform) => {
+    onPlatformChange?.(newPlatform);
+    // Clear the input when switching platforms
+    setUrl('');
+    setShowPaste(true);
+    inputRef.current?.focus();
+  };
+
   return (
     <form onSubmit={handleSubmit} className="mx-auto w-full max-w-3xl" noValidate>
+      {/* Platform Toggle */}
+      <div className="mb-4 flex items-center gap-2" role="group" aria-label="Select platform">
+        <button
+          type="button"
+          onClick={() => handlePlatformChange('instagram')}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+            platform === 'instagram'
+              ? 'bg-primary-600 text-white shadow-sm'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+          )}
+          aria-pressed={platform === 'instagram'}
+        >
+          {ICONS.instagram}
+          Instagram
+        </button>
+        <button
+          type="button"
+          onClick={() => handlePlatformChange('youtube')}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+            platform === 'youtube'
+              ? 'bg-red-600 text-white shadow-sm'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+          )}
+          aria-pressed={platform === 'youtube'}
+        >
+          {ICONS.youtube}
+          YouTube
+        </button>
+      </div>
+
       <div className="relative">
-        <label htmlFor="reel-url" className="sr-only">
-          Instagram Reel URL
+        <label htmlFor="media-url" className="sr-only">
+          {platform === 'instagram' ? 'Instagram Reel URL' : 'YouTube Video URL'}
         </label>
         <div className="relative flex items-center">
           <input
             ref={inputRef}
-            id="reel-url"
+            id="media-url"
             type="url"
             value={url}
             onChange={(e) => {
@@ -64,7 +183,8 @@ export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps
               setShowPaste(false);
             }}
             onFocus={() => setShowPaste(false)}
-            placeholder="https://www.instagram.com/reel/ABC123/"
+            onPaste={handleInputPaste}
+            placeholder={PLACEHOLDERS[platform]}
             className={cn(
               'input pl-14 pr-40',
               error && 'border-red-500 focus:border-red-500 focus:ring-red-500/20',
@@ -147,7 +267,7 @@ export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps
 
         {!error && !isLoading && (
           <p id="url-hint" className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-            Paste an Instagram Reel URL (e.g., instagram.com/reel/ABC123/)
+            {HINTS[platform]}
           </p>
         )}
       </div>
@@ -155,7 +275,8 @@ export function UrlInput({ onSubmit, isLoading, error, disabled }: UrlInputProps
       {/* Legal Notice */}
       <p className="mt-4 text-center text-xs text-gray-500 dark:text-gray-400">
         <strong>Important:</strong> Only download content you own or have permission to download.{' '}
-        Respect creators&apos; rights and Instagram&apos;s Terms of Service.
+        Respect creators&apos; rights and{' '}
+        {platform === 'instagram' ? 'Instagram&apos;s' : 'YouTube&apos;s'} Terms of Service.
       </p>
     </form>
   );

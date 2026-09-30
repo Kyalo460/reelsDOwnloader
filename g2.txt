@@ -1,0 +1,4 @@
+ M .gitignore
+ M public/sw.js
+?? g2.txt
+?? prisma/migrations/

@@ -5,7 +5,14 @@ import {
   isInstagramHostname,
   normalizeInstagramUrl,
   parseInstagramMediaUrl,
+  type InstagramMediaRef,
 } from '@/lib/instagramUrl';
+import {
+  isYouTubeHostname,
+  normalizeYouTubeUrl,
+  parseYouTubeUrl,
+  type YouTubeMediaRef,
+} from '@/lib/youtubeUrl';
 
 const BLOCKED_HOSTS = ['localhost', '127.0.0.1', '169.254.169.254', '0.0.0.0'];
 
@@ -44,10 +51,21 @@ export class UrlValidator {
       );
     }
 
-    // Parse URL. Normalisation tolerates pasted text: a missing scheme,
-    // surrounding quotes and trailing `?igsh=…` / `#media` fragments.
-    const parsed = normalizeInstagramUrl(trimmed);
-    if (!parsed) {
+    // Try Instagram first
+    let parsed = normalizeInstagramUrl(trimmed);
+    let media: InstagramMediaRef | YouTubeMediaRef | null = parsed
+      ? parseInstagramMediaUrl(trimmed)
+      : null;
+    let isInstagram = true;
+
+    if (!media) {
+      // Try YouTube
+      parsed = normalizeYouTubeUrl(trimmed);
+      media = parsed ? parseYouTubeUrl(trimmed) : null;
+      isInstagram = false;
+    }
+
+    if (!parsed || !media) {
       return this.error('INVALID_URL', 'Invalid URL format');
     }
 
@@ -66,20 +84,23 @@ export class UrlValidator {
     }
 
     // Check domain
-    if (!isInstagramHostname(hostname)) {
-      return this.error('UNSUPPORTED_URL', 'Only Instagram URLs are supported');
+    if (isInstagram) {
+      if (!isInstagramHostname(hostname)) {
+        return this.error('UNSUPPORTED_URL', 'Only Instagram and YouTube URLs are supported');
+      }
+    } else {
+      if (!isYouTubeHostname(hostname)) {
+        return this.error('UNSUPPORTED_URL', 'Only Instagram and YouTube URLs are supported');
+      }
     }
 
-    // Check path pattern: /reel, /reels, /p or /tv followed by a shortcode,
-    // with or without a query string, fragment or trailing slash.
-    const media = parseInstagramMediaUrl(trimmed);
-    if (!media) {
-      return this.error('UNSUPPORTED_URL', 'URL must be an Instagram Reel or Post URL');
-    }
+    const shortCode = isInstagram
+      ? (media as InstagramMediaRef).shortCode
+      : (media as YouTubeMediaRef).videoId;
 
     return {
       valid: true,
-      shortCode: media.shortCode,
+      shortCode,
       url: media.url,
     };
   }

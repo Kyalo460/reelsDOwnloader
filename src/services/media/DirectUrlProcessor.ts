@@ -400,6 +400,7 @@ export function toResolutionResult(extracted: ExtractedMedia): MediaResolutionRe
     duration: Math.max(0, Math.round(extracted.duration)),
     media,
     shortCode: extracted.shortCode,
+    platform: 'instagram',
   };
 }
 

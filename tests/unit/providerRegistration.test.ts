@@ -46,7 +46,9 @@ describe('provider registration', () => {
     await import('@/services/media/DownloadService');
 
     const provider = providerRegistry.getProvider('https://www.instagram.com/reel/ABC123/');
-    const headers = provider!.getMediaRequestHeaders('https://scontent.cdninstagram.com/v/t50/a.mp4');
+    const headers = provider!.getMediaRequestHeaders(
+      'https://scontent.cdninstagram.com/v/t50/a.mp4'
+    );
 
     expect(headers.Referer).toBe('https://www.instagram.com/');
     expect(headers.Origin).toBe('https://www.instagram.com');
