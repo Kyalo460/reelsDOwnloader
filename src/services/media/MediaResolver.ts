@@ -158,44 +158,50 @@ export class MediaResolver {
     const prisma = getPrisma();
     if (!prisma) return null;
 
-    // Map the platform-prefixed cache key back to the provider ID format
-    // stored in the database (e.g., "instagram_ABC123" -> "ig_ABC123",
-    // "youtube_ABC123" -> "yt_ABC123")
-    const dbShortCode = cacheKey.replace(/^instagram_/, 'ig_').replace(/^youtube_/, 'yt_');
+    try {
+      // Map the platform-prefixed cache key back to the provider ID format
+      // stored in the database (e.g., "instagram_ABC123" -> "ig_ABC123",
+      // "youtube_ABC123" -> "yt_ABC123")
+      const dbShortCode = cacheKey.replace(/^instagram_/, 'ig_').replace(/^youtube_/, 'yt_');
 
-    // Try the platform-specific ID first
-    const record =
-      (await prisma.reelResolution.findUnique({
-        where: { shortCode: dbShortCode },
-      })) ??
-      // Fall back to the raw cache key for backward compatibility
-      (await prisma.reelResolution.findUnique({
-        where: { shortCode: cacheKey },
-      }));
+      // Try the platform-specific ID first
+      const record =
+        (await prisma.reelResolution.findUnique({
+          where: { shortCode: dbShortCode },
+        })) ??
+        // Fall back to the raw cache key for backward compatibility
+        (await prisma.reelResolution.findUnique({
+          where: { shortCode: cacheKey },
+        }));
 
-    if (!record || record.status !== 'RESOLVED') {
-      return null;
-    }
+      if (!record || record.status !== 'RESOLVED') {
+        return null;
+      }
 
-    if (record.expiresAt < new Date()) {
-      return null;
-    }
+      if (record.expiresAt < new Date()) {
+        return null;
+      }
 
-    const media = stripSourceUrls(record.media as unknown as MediaResolutionResult['media']);
+      const media = stripSourceUrls(record.media as unknown as MediaResolutionResult['media']);
 
-    return {
-      id: record.id,
-      data: {
+      return {
         id: record.id,
-        title: record.title || '',
-        thumbnail: record.thumbnailUrl || '',
-        duration: record.duration || 0,
-        media,
-        shortCode: record.shortCode,
-        platform: (record.id.startsWith('yt_') ? 'youtube' : 'instagram') as Platform,
-      },
-      expiresAt: record.expiresAt,
-    };
+        data: {
+          id: record.id,
+          title: record.title || '',
+          thumbnail: record.thumbnailUrl || '',
+          duration: record.duration || 0,
+          media,
+          shortCode: record.shortCode,
+          platform: (record.id.startsWith('yt_') ? 'youtube' : 'instagram') as Platform,
+        },
+        expiresAt: record.expiresAt,
+      };
+    } catch {
+      // Database might be unavailable or schema might not be migrated.
+      // Gracefully fall back to in-memory resolution.
+      return null;
+    }
   }
 
   private async persistResolution(
@@ -210,69 +216,87 @@ export class MediaResolver {
     // as the database shortCode to avoid conflicts between platforms.
     const dbShortCode = result.id;
 
-    // Reuse the existing record id (links already handed out keep working),
-    // otherwise adopt the provider id.
-    const existing = prisma
-      ? await prisma.reelResolution.findUnique({
-          where: { shortCode: dbShortCode },
-          select: { id: true },
-        })
-      : null;
-
-    const resolutionId = existing?.id ?? result.id;
-    const media = canonicalizeMedia(result.media, resolutionId);
     const ipHash = hashString(options.ipAddress);
 
     if (!prisma) {
       // No database: keep the located media URL in memory so the download
       // endpoint can still stream it for the lifetime of this instance.
       resolutionStore.put({
-        id: resolutionId,
+        id: result.id,
         url: originalUrl,
         shortCode: result.shortCode,
         title: result.title,
         thumbnail: result.thumbnail,
         duration: result.duration,
-        media,
+        media: result.media,
         ipHash,
         userId: options.userId,
         expiresAt,
       });
 
-      return { id: resolutionId, media };
+      return { id: result.id, media: result.media };
     }
 
-    await prisma.reelResolution.upsert({
-      where: { shortCode: dbShortCode },
-      update: {
-        title: result.title,
-        thumbnailUrl: result.thumbnail,
-        duration: result.duration,
-        status: 'RESOLVED',
-        media: media as any,
-        errorCode: null,
-        errorMessage: null,
-        expiresAt,
-        updatedAt: new Date(),
-      },
-      create: {
-        id: resolutionId,
+    try {
+      // Reuse the existing record id (links already handed out keep working),
+      // otherwise adopt the provider id.
+      const existing = await prisma.reelResolution.findUnique({
+        where: { shortCode: dbShortCode },
+        select: { id: true },
+      });
+
+      const resolutionId = existing?.id ?? result.id;
+      const media = canonicalizeMedia(result.media, resolutionId);
+
+      await prisma.reelResolution.upsert({
+        where: { shortCode: dbShortCode },
+        update: {
+          title: result.title,
+          thumbnailUrl: result.thumbnail,
+          duration: result.duration,
+          status: 'RESOLVED',
+          media: media as any,
+          errorCode: null,
+          errorMessage: null,
+          expiresAt,
+          updatedAt: new Date(),
+        },
+        create: {
+          id: resolutionId,
+          url: originalUrl,
+          shortCode: dbShortCode,
+          title: result.title,
+          thumbnailUrl: result.thumbnail,
+          duration: result.duration,
+          status: 'RESOLVED',
+          media: media as any,
+          ipHash,
+          userId: options.userId,
+          expiresAt,
+        },
+      });
+
+      // The id is deterministic (`ig_<shortcode>` or `yt_<videoId>`) or the id of the record
+      // that already existed, so the media URLs we just stored stay resolvable.
+      return { id: resolutionId, media };
+    } catch {
+      // Database might be unavailable or schema might not be migrated.
+      // Fall back to in-memory storage so downloads still work.
+      resolutionStore.put({
+        id: result.id,
         url: originalUrl,
-        shortCode: dbShortCode,
+        shortCode: result.shortCode,
         title: result.title,
-        thumbnailUrl: result.thumbnail,
+        thumbnail: result.thumbnail,
         duration: result.duration,
-        status: 'RESOLVED',
-        media: media as any,
+        media: result.media,
         ipHash,
         userId: options.userId,
         expiresAt,
-      },
-    });
+      });
 
-    // The id is deterministic (`ig_<shortcode>` or `yt_<videoId>`) or the id of the record
-    // that already existed, so the media URLs we just stored stay resolvable.
-    return { id: resolutionId, media };
+      return { id: result.id, media: result.media };
+    }
   }
 
   private async recordResolution(
@@ -284,25 +308,29 @@ export class MediaResolver {
     const prisma = getPrisma();
     if (!prisma) return;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
 
-    await prisma.adminMetric.upsert({
-      where: { date: today },
-      update: {
-        totalRequests: { increment: 1 },
-        successfulResolutions: { increment: success ? 1 : 0 },
-        failedResolutions: { increment: success ? 0 : 1 },
-        errors: { increment: success ? 0 : 1 },
-      },
-      create: {
-        date: today,
-        totalRequests: 1,
-        successfulResolutions: success ? 1 : 0,
-        failedResolutions: success ? 0 : 1,
-        errors: success ? 0 : 1,
-      },
-    });
+      await prisma.adminMetric.upsert({
+        where: { date: today },
+        update: {
+          totalRequests: { increment: 1 },
+          successfulResolutions: { increment: success ? 1 : 0 },
+          failedResolutions: { increment: success ? 0 : 1 },
+          errors: { increment: success ? 0 : 1 },
+        },
+        create: {
+          date: today,
+          totalRequests: 1,
+          successfulResolutions: success ? 1 : 0,
+          failedResolutions: success ? 0 : 1,
+          errors: success ? 0 : 1,
+        },
+      });
+    } catch {
+      // Metrics are best-effort; ignore database errors.
+    }
   }
 
   private createError(code: ErrorCode, message: string): Error {
