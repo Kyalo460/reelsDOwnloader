@@ -297,23 +297,17 @@ export class YouTubeDirectProcessor {
     const thumbnail = oembed.thumbnail_url || getYouTubeThumbnailUrl(videoId, 'hq');
     const duration = oembed.duration_seconds ? parseInt(oembed.duration_seconds, 10) : 0;
 
-    // oEmbed doesn't provide direct media URLs, so we point to a placeholder
-    // The actual download will need yt-dlp to work
-    const media = QUALITY_TIERS.map((quality) => ({
-      quality,
-      format: 'mp4' as const,
-      downloadUrl: `/api/reels/download/yt_${videoId}/${quality}`,
-      fileSize: undefined,
-      width: oembed.width,
-      height: oembed.height,
-    }));
-
+    // oEmbed is a metadata-only API: it exposes no media URLs and no renditions.
+    // Returning placeholder variants here would advertise downloads that cannot
+    // possibly succeed, so `media` stays empty and the UI reports the video as
+    // metadata-only. This matches the documented contract that `media[]` lists
+    // only renditions actually located on the source.
     return {
       id: `yt_${videoId}`,
       title: oembed.title,
       thumbnail,
       duration,
-      media,
+      media: [],
       shortCode: videoId,
       platform: 'youtube',
     };

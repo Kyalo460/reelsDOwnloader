@@ -101,6 +101,14 @@ export async function GET(
       if (message === 'MEDIA_UNAVAILABLE' || message.startsWith('MEDIA_UNAVAILABLE')) {
         return new NextResponse('Media unavailable', { status: 404 });
       }
+      if (message === 'NO_DOWNLOAD_SOURCE' || message.startsWith('NO_DOWNLOAD_SOURCE')) {
+        // Not an expired link: this resolution carries no downloadable
+        // rendition, so asking the client to resolve again would be a lie.
+        return new NextResponse(
+          'No downloadable media for this video. Resolving again will not help.',
+          { status: 501 }
+        );
+      }
     }
 
     return new NextResponse('Internal server error', { status: 500 });

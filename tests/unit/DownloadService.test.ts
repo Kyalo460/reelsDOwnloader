@@ -233,7 +233,10 @@ describe('DownloadService', () => {
       ).rejects.toThrow('EXPIRED');
     });
 
-    it('throws EXPIRED when no located media URL was stored', async () => {
+    it('reports NO_DOWNLOAD_SOURCE, not EXPIRED, when no media URL was located', async () => {
+      // A resolution with only the internal API path carries no streamable
+      // source. Telling the client it expired would be wrong: resolving again
+      // cannot produce a file.
       prismaMocks.findUnique.mockResolvedValue(
         storedResolution({
           media: [
@@ -252,7 +255,7 @@ describe('DownloadService', () => {
           quality: 'original',
           ipAddress: '203.0.113.7',
         })
-      ).rejects.toThrow('EXPIRED');
+      ).rejects.toThrow('NO_DOWNLOAD_SOURCE');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 

@@ -55,12 +55,13 @@ export class DownloadService {
       throw new Error('NOT_FOUND');
     }
 
-    // The direct media URL located on the public page is the actual
-    // source we stream from. Instagram signs those URLs, so a missing source
-    // means the client should resolve the reel again.
+    // The direct media URL located on the public page is the actual source we
+    // stream from. Without one there is nothing to stream: this is NOT an expired
+    // link (re-resolving cannot help), it is a resolution that carries no
+    // downloadable rendition - e.g. YouTube metadata resolved via oEmbed.
     const sourceUrl = resolveSourceUrl(variant);
     if (!sourceUrl) {
-      throw new Error('EXPIRED');
+      throw new Error('NO_DOWNLOAD_SOURCE');
     }
 
     const provider = providerRegistry.getProvider(resolution.url);

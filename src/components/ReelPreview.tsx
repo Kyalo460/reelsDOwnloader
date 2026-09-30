@@ -3,7 +3,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { Download, Play, ExternalLink, X, Loader2, AlertCircle } from 'lucide-react';
+import { Download, Play, ExternalLink, X, Loader2, AlertCircle, Info } from 'lucide-react';
 import { cn, formatDuration, formatBytes } from '@/lib/utils';
 import type { MediaVariant, Platform } from '@/types';
 
@@ -87,8 +87,9 @@ export function ReelPreview({
           />
         )}
 
-        {/* Play Button Overlay */}
-        {!showVideo && (
+        {/* Play Button Overlay. Only offered when a streamable variant exists -
+            a metadata-only resolution has nothing to play. */}
+        {!showVideo && sortedMedia.length > 0 && (
           <button
             onClick={() => handlePlay('sd')}
             className="absolute inset-0 flex items-center justify-center bg-black/30 transition-colors hover:bg-black/40"
@@ -135,7 +136,9 @@ export function ReelPreview({
       {/* Download Options */}
       <div className="mt-6 space-y-3">
         <div className="flex items-center justify-between text-sm text-gray-500 dark:text-gray-400">
-          <span className="font-medium text-gray-700 dark:text-gray-300">Available Downloads</span>
+          <span className="font-medium text-gray-700 dark:text-gray-300">
+            {sortedMedia.length > 0 ? 'Available Downloads' : 'Details'}
+          </span>
           <a
             href={
               platform === 'youtube'
@@ -162,6 +165,19 @@ export function ReelPreview({
             />
           ))}
         </div>
+
+        {sortedMedia.length === 0 && (
+          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20">
+            <Info className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="text-sm text-amber-800 dark:text-amber-200">
+              <p className="font-medium">Preview only - no downloadable media</p>
+              <p className="mt-1 text-amber-700/90 dark:text-amber-300/80">
+                We could only read this video&apos;s public details, not its file. Direct download
+                is not available for it right now.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
