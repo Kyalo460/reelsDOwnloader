@@ -4,8 +4,6 @@
 // import on purpose: without it the registry stays empty at runtime and every
 // URL is rejected as UNSUPPORTED_URL.
 import './InstagramProvider';
-// Registers the Instagram cookie-based provider (requires Playwright)
-import './InstagramCookieProvider';
 // Registers the YouTube provider
 import './YouTubeProvider';
 import { providerRegistry } from './MediaProvider';
