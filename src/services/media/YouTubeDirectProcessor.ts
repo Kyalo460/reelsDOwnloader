@@ -1,10 +1,26 @@
 // YouTube Direct URL Processor
 //
 // Resolves YouTube videos by using yt-dlp to extract direct media URLs and metadata.
-// This requires yt-dlp to be available in the environment.
+// Falls back to an oEmbed-based approach when yt-dlp is not available.
 
-import { spawn } from 'child_process';
 import type { MediaResolutionResult, MediaVariant } from '@/types';
+import { getYouTubeThumbnailUrl } from '@/lib/youtubeUrl';
+
+interface SpawnHandle {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  stdout?: { on(event: string, listener: (...args: any[]) => void): void };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  stderr?: { on(event: string, listener: (...args: any[]) => void): void };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string, listener: (...args: any[]) => void): void;
+  kill(signal?: string): void;
+}
+
+type SpawnFn = (
+  cmd: string,
+  args: string[],
+  options: { stdio: ['ignore', 'pipe', 'pipe'] }
+) => SpawnHandle;
 
 export type YouTubeDirectErrorCode =
   | 'INVALID_URL'
@@ -92,6 +108,17 @@ function selectBestFormats(formats: YtdlpFormat[]): YtdlpFormat[] {
   return ordered.slice(0, QUALITY_TIERS.length);
 }
 
+// YouTube oEmbed API response shape
+interface YouTubeOembedResponse {
+  title: string;
+  thumbnail_url: string;
+  thumbnail_width?: number;
+  thumbnail_height?: number;
+  duration_seconds?: string;
+  width?: number;
+  height?: number;
+}
+
 export class YouTubeDirectProcessor {
   private readonly timeoutMs: number;
   private readonly ytdlpPath: string;
@@ -115,11 +142,22 @@ export class YouTubeDirectProcessor {
       return this.toResolutionResult(extracted);
     } catch (error) {
       if (error instanceof YouTubeDirectError) throw error;
-      throw new YouTubeDirectError('YTDLP_ERROR', `Failed to extract YouTube video info: ${error}`);
+
+      // Fall back to oEmbed if yt-dlp fails
+      try {
+        const extracted = await this.fetchVideoInfoOembed(id);
+        return this.toResolutionResultOembed(id, extracted);
+      } catch {
+        throw error instanceof YouTubeDirectError
+          ? error
+          : new YouTubeDirectError('YTDLP_ERROR', `Failed to extract YouTube video info: ${error}`);
+      }
     }
   }
 
   private async fetchVideoInfo(videoId: string): Promise<ExtractedYouTubeMedia> {
+    const { spawn } = await this.safeSpawnImport();
+
     const args = [
       '--no-warnings',
       '--dump-json',
@@ -130,7 +168,7 @@ export class YouTubeDirectProcessor {
       `https://www.youtube.com/watch?v=${videoId}`,
     ];
 
-    const { stdout, stderr, exitCode } = await this.runYtdlp(args);
+    const { stdout, stderr, exitCode } = await this.runYtdlp(spawn, args);
 
     if (exitCode !== 0) {
       const errorMessage = stderr.toString().trim();
@@ -224,6 +262,54 @@ export class YouTubeDirectProcessor {
     };
   }
 
+  // oEmbed fallback when yt-dlp is not available
+  private async fetchVideoInfoOembed(videoId: string): Promise<YouTubeOembedResponse> {
+    const response = await fetch(
+      `https://www.youtube-nocookie.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new YouTubeDirectError('NOT_FOUND', `YouTube oEmbed returned HTTP ${response.status}`);
+    }
+
+    return response.json() as Promise<YouTubeOembedResponse>;
+  }
+
+  private toResolutionResultOembed(
+    videoId: string,
+    oembed: YouTubeOembedResponse
+  ): MediaResolutionResult {
+    const thumbnail = oembed.thumbnail_url || getYouTubeThumbnailUrl(videoId, 'hq');
+    const duration = oembed.duration_seconds ? parseInt(oembed.duration_seconds, 10) : 0;
+
+    // oEmbed doesn't provide direct media URLs, so we point to a placeholder
+    // The actual download will need yt-dlp to work
+    const media = QUALITY_TIERS.map((quality) => ({
+      quality,
+      format: 'mp4' as const,
+      downloadUrl: `/api/reels/download/yt_${videoId}/${quality}`,
+      fileSize: undefined,
+      width: oembed.width,
+      height: oembed.height,
+    }));
+
+    return {
+      id: `yt_${videoId}`,
+      title: oembed.title,
+      thumbnail,
+      duration,
+      media,
+      shortCode: videoId,
+      platform: 'youtube',
+    };
+  }
+
   private classifyYtdlpError(stderr: string): YouTubeDirectError {
     const lower = stderr.toLowerCase();
 
@@ -264,9 +350,18 @@ export class YouTubeDirectProcessor {
     return new YouTubeDirectError('YTDLP_ERROR', stderr || 'Unknown yt-dlp error');
   }
 
-  private runYtdlp(args: string[]): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
+  private async safeSpawnImport(): Promise<{ spawn: SpawnFn }> {
+    // Use dynamic import to avoid module loading issues in serverless environments
+    const mod = await import('child_process');
+    return { spawn: mod.spawn as SpawnFn };
+  }
+
+  private async runYtdlp(
+    spawnFn: SpawnFn,
+    args: string[]
+  ): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.ytdlpPath, args, {
+      const child = spawnFn(this.ytdlpPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -274,11 +369,11 @@ export class YouTubeDirectProcessor {
       let stderr = Buffer.alloc(0);
 
       child.stdout?.on('data', (chunk) => {
-        stdout = Buffer.concat([stdout, chunk]);
+        stdout = Buffer.concat([stdout, Buffer.from(chunk)]);
       });
 
       child.stderr?.on('data', (chunk) => {
-        stderr = Buffer.concat([stderr, chunk]);
+        stderr = Buffer.concat([stderr, Buffer.from(chunk)]);
       });
 
       const timeoutId = setTimeout(() => {
@@ -286,12 +381,12 @@ export class YouTubeDirectProcessor {
         reject(new YouTubeDirectError('YTDLP_ERROR', 'yt-dlp timed out'));
       }, this.timeoutMs);
 
-      child.on('close', (exitCode) => {
+      child.on('close', (exitCode: number) => {
         clearTimeout(timeoutId);
         resolve({ stdout, stderr, exitCode: exitCode ?? 1 });
       });
 
-      child.on('error', (error: NodeJS.ErrnoException) => {
+      child.on('error', (error: { code?: string; message: string }) => {
         clearTimeout(timeoutId);
         if (error.code === 'ENOENT') {
           reject(new YouTubeDirectError('YTDLP_NOT_FOUND', 'yt-dlp not found in PATH'));
@@ -306,16 +401,24 @@ export class YouTubeDirectProcessor {
 export const youtubeDirectProcessor = new YouTubeDirectProcessor();
 
 export function extractVideoId(url: string): string | undefined {
-  const parsed = new URL(url);
-  const hostname = parsed.hostname.toLowerCase();
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
 
-  if (hostname === 'youtu.be' || hostname === 'www.youtu.be') {
-    return parsed.pathname.slice(1);
+    if (hostname === 'youtu.be' || hostname === 'www.youtu.be') {
+      return parsed.pathname.slice(1);
+    }
+
+    if (parsed.pathname.startsWith('/shorts/')) {
+      return parsed.pathname.split('/')[2];
+    }
+
+    if (parsed.pathname.startsWith('/embed/')) {
+      return parsed.pathname.split('/')[2];
+    }
+
+    return parsed.searchParams.get('v') ?? undefined;
+  } catch {
+    return undefined;
   }
-
-  if (parsed.pathname === '/shorts') {
-    return parsed.pathname.split('/')[2];
-  }
-
-  return parsed.searchParams.get('v') ?? undefined;
 }
