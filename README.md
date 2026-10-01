@@ -120,6 +120,25 @@ bundled build via `npx playwright install chromium`.
 
 Supplied cookies always win over automated login when both are configured.
 
+#### Refreshing an expiring session
+
+`sessionid` cookies expire — realistically every few weeks, not months. Refreshing
+one is a single request, and does **not** require a rebuild or a redeploy:
+
+```bash
+curl -X POST https://<your-domain>/api/auth/instagram/session \
+  -H "x-admin-key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"cookies":"sessionid=...; csrftoken=..."}'
+```
+
+With a database configured the session is written to a single-row table and read
+at request time. That matters on Vercel specifically: a deployment is an
+immutable artifact, so changing `INSTAGRAM_SESSION_COOKIES` only takes effect on
+a new deployment, and anything held in memory is lost on the next cold start.
+Check what is currently in effect with `GET /api/auth/instagram/session`, and
+verify local configuration with `npm run auth:check`.
+
 > **Warning:** These cookies grant full access to the Instagram account they
 > came from — anyone holding them can post, message, and change account
 > settings. Use a throwaway account, never a personal one, and never commit the
