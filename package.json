@@ -25,7 +25,8 @@
     "security:audit": "npm audit --audit-level=high",
     "postinstall": "prisma generate",
     "prepare": "husky install",
-    "auth:instagram": "tsx scripts/init-instagram-cookies.ts"
+    "auth:instagram": "tsx scripts/init-instagram-cookies.ts",
+    "auth:check": "tsx scripts/check-instagram-config.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",

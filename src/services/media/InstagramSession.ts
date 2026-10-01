@@ -203,6 +203,167 @@ async function launchContext(credentials: InstagramCredentials): Promise<Browser
   return context;
 }
 
+/**
+ * Selectors for the login form.
+ *
+ * Instagram ships a client-rendered app shell, and it has renamed these fields
+ * before, so each field lists several known-good spellings and the first match
+ * wins. A selector that stops matching shows up as an unexplained login
+ * failure, so `describeLoginPage` turns that case into a readable cause.
+ *
+ * The first entry in each list is what the live page actually serves as of
+ * 2026-09: the credential input is `name="email"` (labelled "Mobile number,
+ * username or email") and the password input is `name="pass"`. Both were
+ * previously `username`/`password`, and the submit control is a div rather
+ * than a button, so `button[type="submit"]` matches nothing at all.
+ */
+const LOGIN_FIELD_SELECTORS = {
+  username: [
+    'input[name="email"]',
+    'input[autocomplete="username"]',
+    'input[id="username"]',
+    'input[name="username"]',
+    'input[name="phone_number"]',
+    'input[placeholder*="Phone number" i]',
+    'input[placeholder*="username" i]',
+    'input[aria-label*="Username" i]',
+    'input[type="text"]',
+  ],
+  password: [
+    'input[name="pass"]',
+    'input[autocomplete="current-password"]',
+    'input[name="password"]',
+    'input[type="password"]',
+  ],
+};
+
+const LOGIN_SUBMIT_SELECTOR = [
+  '[role="button"][aria-label="Log In"]',
+  'button[type="submit"]',
+  'div[role="button"]:has-text("Log in")',
+  'button:has-text("Log in")',
+].join(', ');
+
+/**
+ * Clicks the submit control.
+ *
+ * `.first()` is required: the selector is a list, and if more than one element
+ * matches, Playwright's strict mode rejects the click outright rather than
+ * picking one.
+ */
+async function clickLoginSubmit(page: Page): Promise<void> {
+  await page.locator(LOGIN_SUBMIT_SELECTOR).first().click();
+}
+
+/**
+ * The 2FA code field. Unverified against a live 2FA screen - it only appears
+ * after a successful credential submit - so it is matched loosely by role,
+ * autocomplete, placeholder and label rather than by a single name.
+ */
+const TWO_FACTOR_SELECTORS = [
+  'input[name="verificationCode"]',
+  'input[autocomplete="one-time-code"]',
+  'input[placeholder*="code" i]',
+  'input[aria-label*="code" i]',
+  'input[aria-label*="Authentication" i]',
+];
+
+/** First selector in the list that resolves to a visible element, if any. */
+async function firstVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.isVisible().catch(() => false)) return selector;
+  }
+
+  return null;
+}
+
+/**
+ * Waits for the login form to render.
+ *
+ * A bare timeout here previously surfaced as `page.fill: Timeout 30000ms
+ * exceeded`, which says nothing about why. The failure branch below reports
+ * what Instagram actually served instead, because "the form never appeared" has
+ * very different causes - bot detection, a consent wall, a regional block -
+ * and only one of them is fixable in this file.
+ */
+async function waitForLoginForm(page: Page): Promise<void> {
+  const deadline = Date.now() + 45_000;
+
+  while (Date.now() < deadline) {
+    const username = await firstVisibleSelector(page, LOGIN_FIELD_SELECTORS.username);
+    const password = await firstVisibleSelector(page, LOGIN_FIELD_SELECTORS.password);
+
+    if (username && password) return;
+
+    await page.waitForTimeout(500);
+  }
+
+  throw new Error(await describeLoginPage(page));
+}
+
+async function fillLoginField(page: Page, username: string, password: string): Promise<void> {
+  const usernameSelector = await firstVisibleSelector(page, LOGIN_FIELD_SELECTORS.username);
+  const passwordSelector = await firstVisibleSelector(page, LOGIN_FIELD_SELECTORS.password);
+
+  if (!usernameSelector || !passwordSelector) {
+    throw new Error(await describeLoginPage(page));
+  }
+
+  await page.fill(usernameSelector, username);
+  await page.fill(passwordSelector, password);
+}
+
+/** Explains what the login page is actually showing, for the failure message. */
+async function describeLoginPage(page: Page): Promise<string> {
+  const url = page.url();
+  const title = await page.title().catch(() => '');
+  const text = await page
+    .locator('body')
+    .innerText()
+    .catch(() => '');
+
+  const signals: string[] = [];
+  const haystack = `${title} ${text}`.toLowerCase();
+
+  const known: Array<[RegExp, string]> = [
+    [
+      /suspicious activity|unusual login|confirm it'?s you/,
+      'Instagram flagged the login as suspicious',
+    ],
+    [/checkpoint_required|checkpoint/, 'Instagram presented a checkpoint'],
+    [/captcha|verify it'?s you|are you a robot/i, 'Instagram presented a CAPTCHA'],
+    [
+      /temporarily blocked|try again later|too many attempts/,
+      'Instagram rate limited or temporarily blocked this account',
+    ],
+    [/allow all cookies|accept all/, 'A cookie consent dialog is blocking the form'],
+    [/this account has been disabled|your account has been disabled/, 'The account is disabled'],
+    [
+      /page not found|content isn't available/i,
+      'Instagram served a not-found page instead of the login form',
+    ],
+  ];
+
+  for (const [pattern, label] of known) {
+    if (pattern.test(haystack)) signals.push(label);
+  }
+
+  const excerpt = text.replace(/\s+/g, ' ').trim().slice(0, 160);
+
+  return [
+    "Instagram's login form never rendered, so the account could not be used.",
+    `  Final URL:  ${url}`,
+    `  Page title: ${title || '(none)'}`,
+    signals.length > 0
+      ? `  Detected:   ${signals.join('; ')}`
+      : '  Detected:   nothing recognisable',
+    `  Page text:  ${excerpt || '(empty)'}`,
+    '  This is Instagram refusing to serve the login page to an automated browser.',
+    '  A manual login in a real browser, supplying session cookies, is the only reliable path.',
+  ].join('\n');
+}
+
 async function performLogin(): Promise<InstagramSession> {
   const context =
     globalForSession.igContext ?? (await launchContext(globalForSession.igCredentials!));
@@ -215,6 +376,12 @@ async function performLogin(): Promise<InstagramSession> {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     });
+
+    // Instagram serves a ~635 KB JavaScript app shell with no form markup; the
+    // fields only exist once its bundle runs. Waiting for the actual field is
+    // therefore the only reliable readiness signal, and 'domcontentloaded'
+    // alone is not.
+    await waitForLoginForm(page);
 
     // Dismiss the consent interstitial if it is shown; it blocks the form.
     for (const label of [
@@ -230,9 +397,8 @@ async function performLogin(): Promise<InstagramSession> {
       }
     }
 
-    await page.fill('input[name="username"]', credentials.username);
-    await page.fill('input[name="password"]', credentials.password);
-    await page.click('button[type="submit"]');
+    await fillLoginField(page, credentials.username, credentials.password);
+    await clickLoginSubmit(page);
 
     try {
       await page.waitForURL((url) => !url.toString().includes('/accounts/login/'), {
@@ -244,20 +410,19 @@ async function performLogin(): Promise<InstagramSession> {
       // check below turns that into a precise error.
     }
 
-    if (
-      await page
-        .locator('input[name="verificationCode"]')
-        .isVisible()
-        .catch(() => false)
-    ) {
+    // Instagram's 2FA step reuses the same shell, and its field naming has also
+    // drifted, so this is matched loosely and only after a submit.
+    const codeSelector = await firstVisibleSelector(page, TWO_FACTOR_SELECTORS);
+
+    if (codeSelector) {
       if (!credentials.twoFactorSecret) {
         throw new Error(
           'Instagram requires 2FA for this account. Set INSTAGRAM_2FA_SECRET to the base32 TOTP secret.'
         );
       }
 
-      await page.fill('input[name="verificationCode"]', generateTOTP(credentials.twoFactorSecret));
-      await page.click('button[type="submit"]');
+      await page.fill(codeSelector, generateTOTP(credentials.twoFactorSecret));
+      await clickLoginSubmit(page);
       await page.waitForURL((url) => !url.toString().includes('/accounts/login/'), {
         timeout: 20_000,
       });
@@ -268,7 +433,11 @@ async function performLogin(): Promise<InstagramSession> {
     }
 
     if (!(await isLoggedIn(page))) {
-      throw new Error(`Instagram login failed - still on the login page (${page.url()})`);
+      throw new Error(
+        `Instagram login failed - still on the login page (${page.url()}). ` +
+          'If the credentials are correct, Instagram usually means it wants a ' +
+          'confirmation code or an emailed link rather than a password.'
+      );
     }
 
     const cookies = (await context.cookies()).filter((cookie) =>
@@ -303,10 +472,20 @@ export async function initializeInstagramSession(
   globalForSession.igCredentials = credentials;
   await launchContext(credentials);
 
-  const session = await performLogin();
-  globalForSession.igSession = session;
-
-  return session;
+  // Recorded here as well as in ensureFreshSession: an explicit login is
+  // usually someone debugging, and the reason it failed is the whole reason
+  // they asked. Without this the status endpoint reported a null failure for a
+  // login that had just thrown.
+  try {
+    const session = await performLogin();
+    globalForSession.igSession = session;
+    globalForSession.igFailure = null;
+    return session;
+  } catch (error) {
+    globalForSession.igFailure =
+      error instanceof Error ? error.message : 'Instagram login failed for an unknown reason';
+    throw error;
+  }
 }
 
 /** The current session, or null when none is configured or it has expired. */
