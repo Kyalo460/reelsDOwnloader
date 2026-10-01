@@ -119,13 +119,49 @@ interface YouTubeOembedResponse {
   height?: number;
 }
 
+/**
+ * True when the error describes the extraction path failing, not the video.
+ *
+ * These are the only codes that justify falling back to oEmbed: the extractor
+ * never got far enough to learn anything about the video itself. Everything
+ * else is a verdict about the video and must be reported unchanged.
+ */
+function isExtractionFailure(code: YouTubeDirectErrorCode): boolean {
+  return code === 'YTDLP_ERROR' || code === 'YTDLP_NOT_FOUND';
+}
+
+/**
+ * Digs yt-dlp's real error text out of a failed extraction-service response.
+ *
+ * The service returns `{"error": "<yt-dlp stderr>"}`, and that text is what
+ * distinguishes a private video from a removed one from a bot check. Falling
+ * back to the status code keeps the classifier from reporting a bare
+ * "unknown error" when the body is not the JSON we expect.
+ */
+function extractServiceError(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+      const message = (parsed as { error?: unknown }).error;
+      if (typeof message === 'string' && message.trim()) {
+        return message;
+      }
+    }
+  } catch {
+    // Not JSON - fall through to the raw body.
+  }
+  return body.trim() || 'The extraction service returned an error';
+}
+
 export class YouTubeDirectProcessor {
   private readonly timeoutMs: number;
   private readonly ytdlpPath: string;
+  private readonly fetchImpl?: typeof fetch;
 
-  constructor(options: { timeoutMs?: number; ytdlpPath?: string } = {}) {
+  constructor(options: { timeoutMs?: number; ytdlpPath?: string; fetchImpl?: typeof fetch } = {}) {
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.ytdlpPath = options.ytdlpPath ?? 'yt-dlp';
+    this.fetchImpl = options.fetchImpl;
   }
 
   async process(url: string, videoId?: string): Promise<MediaResolutionResult> {
@@ -141,21 +177,29 @@ export class YouTubeDirectProcessor {
       const extracted = await this.fetchVideoInfo(id);
       return this.toResolutionResult(extracted);
     } catch (error) {
-      // yt-dlp failed (binary missing on serverless, timeout, etc.):
-      // fall back to YouTube's public oEmbed API for title/thumbnail/duration.
-      // oEmbed does not provide direct media URLs, so downloads are unsupported
-      // in this path - but metadata still lets the UI show the video info.
       const originalError =
         error instanceof YouTubeDirectError
           ? error
           : new YouTubeDirectError('YTDLP_ERROR', String(error));
 
+      // A content verdict from the extractor is authoritative: it knows whether
+      // the video is private, removed, age-gated or geo-blocked. oEmbed only
+      // reports whether a video exists, so letting its NOT_FOUND override would
+      // relabel a private or region-locked video as deleted. Throw it as-is.
+      if (!isExtractionFailure(originalError.code)) {
+        throw originalError;
+      }
+
+      // The extractor itself failed - service unreachable, timed out, or hit
+      // YouTube's bot check. oEmbed is public and cheap, so fall back to it for
+      // title, thumbnail and duration. It exposes no media URLs, so the result
+      // is preview-only rather than a broken download button.
       try {
         const extracted = await this.fetchVideoInfoOembed(id);
         return this.toResolutionResultOembed(id, extracted);
       } catch (oembedError) {
-        // If oEmbed also failed with NOT_FOUND, the video likely doesn't exist.
-        // Prefer that error over the yt-dlp error since it's more accurate.
+        // With the extractor down, oEmbed's existence check is the best signal
+        // available, so prefer it when it can answer the question.
         if (oembedError instanceof YouTubeDirectError && oembedError.code === 'NOT_FOUND') {
           throw oembedError;
         }
@@ -164,7 +208,100 @@ export class YouTubeDirectProcessor {
     }
   }
 
+  /**
+   * Resolves video metadata, preferring the hosted extraction service.
+   *
+   * The remote path is tried first whenever `YTDLP_SERVICE_URL` is configured,
+   * because on serverless the local `spawn` below cannot work at all. The local
+   * binary remains a fallback for development machines that have yt-dlp
+   * installed, so the app keeps working without the service during local work.
+   */
   private async fetchVideoInfo(videoId: string): Promise<ExtractedYouTubeMedia> {
+    const serviceUrl = process.env.YTDLP_SERVICE_URL?.trim();
+
+    if (serviceUrl) {
+      try {
+        const info = await this.fetchVideoInfoRemote(serviceUrl, videoId);
+        return this.extractMedia(info);
+      } catch (error) {
+        // A verdict about the video itself is final. Private, removed and
+        // geo-blocked are facts about the video, so a second extractor cannot
+        // improve on it and retrying would only bury the real reason.
+        if (error instanceof YouTubeDirectError && !isExtractionFailure(error.code)) {
+          throw error;
+        }
+        // Otherwise the service failed (unreachable, timed out, bot check), so
+        // fall through and let a local yt-dlp try, if this machine has one.
+      }
+    }
+
+    return this.fetchVideoInfoLocal(videoId);
+  }
+
+  /** Calls the hosted yt-dlp wrapper and parses its yt-dlp JSON response. */
+  private async fetchVideoInfoRemote(serviceUrl: string, videoId: string): Promise<YtdlpVideoInfo> {
+    const token = process.env.YTDLP_SERVICE_TOKEN?.trim();
+    const doFetch = this.fetchImpl ?? globalThis.fetch;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let response: Response;
+    try {
+      response = await doFetch(`${serviceUrl.replace(/\/+$/, '')}/extract`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          // The service refuses all requests when it has no token configured,
+          // so a missing one here is a configuration error worth surfacing.
+          ...(token ? { 'X-Service-Token': token } : {}),
+        },
+        body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${videoId}` }),
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+    } catch {
+      throw new YouTubeDirectError('YTDLP_ERROR', 'Could not reach the yt-dlp extraction service');
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw new YouTubeDirectError(
+        'YTDLP_ERROR',
+        'The yt-dlp extraction service rejected our credentials'
+      );
+    }
+    if (response.status === 400) {
+      throw new YouTubeDirectError('INVALID_URL', 'The extraction service rejected the video URL');
+    }
+
+    let body: string;
+    try {
+      body = await response.text();
+    } catch {
+      throw new YouTubeDirectError('YTDLP_ERROR', 'Could not read the extraction service response');
+    }
+
+    if (!response.ok) {
+      // The service forwards yt-dlp's stderr in `error`, which carries the real
+      // cause (private, removed, bot check). Reuse the same classifier the local
+      // path uses so both produce identical error codes.
+      throw this.classifyYtdlpError(extractServiceError(body));
+    }
+
+    try {
+      return JSON.parse(body) as YtdlpVideoInfo;
+    } catch {
+      throw new YouTubeDirectError(
+        'YTDLP_ERROR',
+        'Failed to parse the extraction service response'
+      );
+    }
+  }
+
+  /** Runs the local yt-dlp binary. Unusable on serverless, fine on a workstation. */
+  private async fetchVideoInfoLocal(videoId: string): Promise<ExtractedYouTubeMedia> {
     const { spawn } = await this.safeSpawnImport();
 
     const args = [
