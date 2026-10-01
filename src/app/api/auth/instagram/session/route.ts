@@ -11,8 +11,10 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import {
+  canAttemptInstagramSession,
   closeInstagramSession,
   getInstagramSession,
+  getInstagramSessionFailure,
   initializeInstagramSession,
 } from '@/services/media/InstagramSession';
 
@@ -79,8 +81,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const session = getInstagramSession();
 
   return NextResponse.json({
+    // `credentialsConfigured` is the field to check first. When it is false the
+    // automatic fallback is inert and every auth-gated reel will fail, because
+    // InstagramSession never has anything to sign in with.
+    credentialsConfigured: canAttemptInstagramSession(),
     authenticated: session !== null,
     expiresAt: session?.expiresAt ?? null,
+    cookieCount: session?.cookies.length ?? 0,
+    lastFailure: getInstagramSessionFailure(),
   });
 }
 

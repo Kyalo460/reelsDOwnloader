@@ -48,7 +48,8 @@ const globalForSession = globalThis as unknown as {
   igContext?: BrowserContext | null;
   igSession?: InstagramSession | null;
   igCredentials?: InstagramCredentials | null;
-  igLoginInFlight?: Promise<InstagramSession> | null;
+  igLoginInFlight?: Promise<InstagramSession | null> | null;
+  igFailure?: string | null;
 };
 
 /**
@@ -364,20 +365,41 @@ async function ensureFreshSession(): Promise<InstagramSession | null> {
   const existing = getInstagramSession();
   if (existing) return existing;
 
-  if (!globalForSession.igCredentials) return null;
+  if (!globalForSession.igCredentials) {
+    globalForSession.igFailure =
+      'No Instagram account is configured, so no signed-in session is available.';
+    return null;
+  }
 
   if (!globalForSession.igLoginInFlight) {
     globalForSession.igLoginInFlight = performLogin()
       .then((session) => {
         globalForSession.igSession = session;
+        globalForSession.igFailure = null;
         return session;
+      })
+      .catch((error: unknown) => {
+        // The reason a login failed is the single most useful thing to surface.
+        // Without it every failure mode collapses into one anonymous-looking
+        // error and there is nothing to act on.
+        globalForSession.igFailure =
+          error instanceof Error ? error.message : 'Instagram login failed for an unknown reason';
+        return null;
       })
       .finally(() => {
         globalForSession.igLoginInFlight = null;
       });
   }
 
-  return globalForSession.igLoginInFlight.catch(() => null);
+  return (await globalForSession.igLoginInFlight) ?? null;
+}
+
+/**
+ * Why the authenticated path could not produce media, or null if it has not
+ * failed since the last successful login.
+ */
+export function getInstagramSessionFailure(): string | null {
+  return globalForSession.igFailure ?? null;
 }
 
 interface AuthenticatedTarget {
@@ -411,7 +433,6 @@ export async function fetchWithSession(
     { url: `${INSTAGRAM_ORIGIN}/api/v1/media/${shortCode}/info/`, kind: 'json' },
     { url: base, kind: 'html' },
   ];
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
 
@@ -442,6 +463,7 @@ export async function fetchWithSession(
         // 401/403 mean the session is no longer valid for this content.
         if (response.status === 401 || response.status === 403) {
           globalForSession.igSession = null;
+          globalForSession.igFailure = `Instagram rejected the session (HTTP ${response.status}). The account may have been signed out, or the reel may be restricted.`;
           return null;
         }
 
@@ -463,6 +485,11 @@ export async function fetchWithSession(
   } finally {
     clearTimeout(timeout);
   }
+
+  // Logged in successfully, but Instagram still served no media URL.
+  globalForSession.igFailure =
+    'Signed in successfully, but Instagram returned no video file for this reel. ' +
+    'The reel may be restricted even to signed-in accounts, or Instagram may be withholding it from this account.';
 
   return null;
 }

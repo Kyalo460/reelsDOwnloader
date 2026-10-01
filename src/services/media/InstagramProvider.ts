@@ -20,6 +20,7 @@ import {
   canAttemptInstagramSession,
   fetchWithSession,
   getInstagramCookieHeader,
+  getInstagramSessionFailure,
 } from './InstagramSession';
 import type { MediaResolutionResult } from '@/types';
 
@@ -54,7 +55,17 @@ export class InstagramProvider extends BaseMediaProvider {
       const kind = /\/(?:reels?|tv)\//i.test(url) ? 'reel' : 'p';
       const authenticated = await fetchWithSession(shortCode, kind);
       if (!authenticated) {
-        throw error;
+        // Re-throw with the reason the session could not help. Without it every
+        // failure mode - no account configured, login refused, challenge
+        // presented - surfaces as one anonymous-looking message with no
+        // indication of which to fix.
+        const reason = getInstagramSessionFailure();
+        const detailed = new Error(
+          `AUTH_REQUIRED - ${reason ?? 'The signed-in session returned no video for this reel.'}`
+        ) as Error & { code?: string };
+        detailed.code = 'AUTH_REQUIRED';
+        detailed.cause = error;
+        throw detailed;
       }
 
       return authenticated;
