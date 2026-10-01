@@ -8,7 +8,11 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { existsSync } from 'fs';
 import { basename } from 'path';
-import { generateTOTP, resolveBrowserExecutable } from '@/services/media/InstagramSession';
+import {
+  generateTOTP,
+  resolveBrowserExecutable,
+  shortcodeToMediaId,
+} from '@/services/media/InstagramSession';
 
 /**
  * RFC 6238 Appendix B test vector: the ASCII secret "12345678901234567890"
@@ -184,19 +188,77 @@ describe('InstagramSession', () => {
       expect(service.canAttemptInstagramSession()).toBe(false);
     });
 
-    it('keeps seeded credentials on globalThis so route module copies agree', async () => {
+    it('seeds onto globalThis lazily, so route module copies agree', async () => {
       const service = await import('@/services/media/InstagramSession');
 
       // Deliberate: Next.js can hold more than one module instance for a route,
       // and every copy must agree that a login is possible. Persisting to
       // globalThis is what stops a fresh copy from silently disabling the
       // automatic path.
+      //
+      // Seeding is deferred to first use rather than done at module load,
+      // because import order decides when a module body runs and process.env
+      // is not guaranteed to be populated yet. Reading the assertion before the
+      // first call would pin the eager behaviour this deliberately avoids.
+      const before = (globalThis as { igCredentials?: unknown }).igCredentials;
+      expect(before).toBeUndefined();
+
+      expect(service.canAttemptInstagramSession()).toBe(true);
+
       expect((globalThis as { igCredentials?: unknown }).igCredentials).toEqual({
         username: 'env-user',
         password: 'env-pass',
         twoFactorSecret: undefined,
       });
+    });
+
+    it('still reports armed after the environment is loaded late', async () => {
+      // The scenario lazy seeding exists for: the module was imported before
+      // anything populated process.env. An eager implementation would have
+      // latched "not configured" and never recovered.
+      const service = await import('@/services/media/InstagramSession');
+      delete (globalThis as { igCredentials?: unknown }).igCredentials;
+
+      process.env.INSTAGRAM_USERNAME = 'late-user';
+      process.env.INSTAGRAM_PASSWORD = 'late-pass';
+
       expect(service.canAttemptInstagramSession()).toBe(true);
+      expect((globalThis as { igCredentials?: unknown }).igCredentials).toMatchObject({
+        username: 'late-user',
+      });
+    });
+  });
+
+  describe('shortcodeToMediaId', () => {
+    // Instagram's internal media endpoint rejects a shortcode with
+    // "Invalid media_id" and only accepts the decoded numeric id, so this
+    // conversion is what makes the authenticated read work at all.
+    it('decodes a real shortcode to the media id Instagram accepts', () => {
+      // Verified live: this exact pair returns HTTP 200 with video_versions,
+      // while the shortcode form returns HTTP 400 "Invalid media_id".
+      expect(shortcodeToMediaId('DbY4CmbMZ43')).toBe('3952155142319611447');
+    });
+
+    it('decodes a single-character shortcode to its alphabet index', () => {
+      expect(shortcodeToMediaId('A')).toBe('0');
+      expect(shortcodeToMediaId('B')).toBe('1');
+      expect(shortcodeToMediaId('-')).toBe('62');
+      expect(shortcodeToMediaId('_')).toBe('63');
+    });
+
+    it('keeps precision past 2^53, where a Number would silently corrupt the id', () => {
+      // Media ids exceed Number.MAX_SAFE_INTEGER, so accumulating in a JS
+      // number loses the low digits and yields a plausible but wrong id. This
+      // value is chosen so the naive number implementation differs.
+      const id = shortcodeToMediaId('DbY4CmbMZ43');
+
+      expect(BigInt(id)).toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
+      // The lossy path loses the trailing digits rather than failing.
+      expect(String(Number(id))).not.toBe(id);
+    });
+
+    it('rejects characters outside the shortcode alphabet', () => {
+      expect(() => shortcodeToMediaId('abc$def')).toThrow(/invalid character/i);
     });
   });
 });

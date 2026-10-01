@@ -47,6 +47,12 @@ const globalForSession = globalThis as unknown as {
   igBrowser?: Browser | null;
   igContext?: BrowserContext | null;
   igSession?: InstagramSession | null;
+  /**
+   * undefined means "not evaluated yet". That third state is what makes the
+   * seeding below safe to defer: evaluating at module load would read
+   * process.env before a caller had a chance to load .env, and an unconfigured
+   * result would then stick for the life of the process.
+   */
   igCredentials?: InstagramCredentials | null;
   igLoginInFlight?: Promise<InstagramSession | null> | null;
   igFailure?: string | null;
@@ -79,10 +85,19 @@ function credentialsFromEnv(): InstagramCredentials | null {
   };
 }
 
-// Seeded at module load so the automatic path works without any explicit
-// initialisation call. initializeInstagramSession still overrides this when a
-// caller supplies credentials explicitly.
-globalForSession.igCredentials ??= credentialsFromEnv();
+/**
+ * Evaluates the environment credentials on first use.
+ *
+ * Deferred rather than run at module load because import order decides when a
+ * module body executes, and process.env is not guaranteed to be populated yet
+ * at that point - anything importing this module before the .env loader runs
+ * would otherwise permanently record "no credentials configured".
+ */
+function ensureCredentialsSeeded(): void {
+  if (globalForSession.igCredentials === undefined) {
+    globalForSession.igCredentials = credentialsFromEnv();
+  }
+}
 
 /**
  * Browser binaries to try when Playwright's own download is unavailable.
@@ -364,10 +379,44 @@ async function describeLoginPage(page: Page): Promise<string> {
   ].join('\n');
 }
 
+/** Instagram's 64-character URL-safe base64 alphabet, used by shortcodes. */
+const SHORTCODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/**
+ * Converts a reel shortcode into the numeric media id the internal API wants.
+ *
+ * A shortcode is not a separate identifier - it is the media id written in
+ * base64 with Instagram's URL-safe alphabet. The two names for the same object
+ * are why `/api/v1/media/<shortcode>/info/` answers `Invalid media_id`: that
+ * endpoint only accepts the decoded integer.
+ *
+ * BigInt is required, not stylistic. Media ids currently run past 2^53, so
+ * accumulating in a JS number silently loses the low digits and produces a
+ * plausible-looking but wrong id.
+ */
+export function shortcodeToMediaId(shortcode: string): string {
+  let value = 0n;
+
+  for (const char of shortcode) {
+    const index = SHORTCODE_ALPHABET.indexOf(char);
+    if (index === -1) {
+      throw new Error(`Shortcode contains an invalid character: ${char}`);
+    }
+    value = value * 64n + BigInt(index);
+  }
+
+  return value.toString();
+}
+
 async function performLogin(): Promise<InstagramSession> {
-  const context =
-    globalForSession.igContext ?? (await launchContext(globalForSession.igCredentials!));
-  const credentials = globalForSession.igCredentials!;
+  ensureCredentialsSeeded();
+
+  const credentials = globalForSession.igCredentials;
+  if (!credentials) {
+    throw new Error('No Instagram credentials are available to sign in with.');
+  }
+
+  const context = globalForSession.igContext ?? (await launchContext(credentials));
 
   const page = await context.newPage();
 
@@ -515,6 +564,7 @@ export function isInstagramSessionConfigured(): boolean {
  * this, not on having a cookie header in hand.
  */
 export function canAttemptInstagramSession(): boolean {
+  ensureCredentialsSeeded();
   return globalForSession.igCredentials !== null;
 }
 
@@ -543,6 +593,8 @@ export async function closeInstagramSession(): Promise<void> {
 async function ensureFreshSession(): Promise<InstagramSession | null> {
   const existing = getInstagramSession();
   if (existing) return existing;
+
+  ensureCredentialsSeeded();
 
   if (!globalForSession.igCredentials) {
     globalForSession.igFailure =
@@ -607,9 +659,22 @@ export async function fetchWithSession(
   const cookieHeader = getInstagramCookieHeader();
   if (!cookieHeader) return null;
 
+  // The internal endpoint rejects a shortcode outright ("Invalid media_id"), so
+  // it has to be addressed by the decoded numeric id.
+  let mediaId: string;
+  try {
+    mediaId = shortcodeToMediaId(shortCode);
+  } catch (error) {
+    globalForSession.igFailure =
+      error instanceof Error ? error.message : 'Could not interpret the reel shortcode';
+    return null;
+  }
+
   const base = `${INSTAGRAM_ORIGIN}/${kind}/${shortCode}/`;
   const targets: AuthenticatedTarget[] = [
-    { url: `${INSTAGRAM_ORIGIN}/api/v1/media/${shortCode}/info/`, kind: 'json' },
+    { url: `${INSTAGRAM_ORIGIN}/api/v1/media/${mediaId}/info/`, kind: 'json' },
+    // A plain cookie replay of the public page still gets the login wall, but
+    // it is kept as a cheap second chance in case the endpoint form changes.
     { url: base, kind: 'html' },
   ];
   const controller = new AbortController();

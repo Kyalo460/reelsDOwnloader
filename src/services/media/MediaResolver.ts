@@ -403,7 +403,16 @@ export class MediaResolver {
 
     switch (code) {
       case 'AUTH_REQUIRED':
-        return 'This reel exists, but Instagram only serves its video to a signed-in session, so it cannot be downloaded anonymously.';
+        // When a signed-in session was configured and still could not serve the
+        // reel, the provider supplies the specific cause (no account
+        // configured, login refused, challenge presented, Instagram withholding
+        // the file). Swallowing that and printing the generic anonymous-only
+        // sentence made a working fallback indistinguishable from a disabled
+        // one, which is the opposite of what this message is for.
+        return (
+          message ||
+          'This reel exists, but Instagram only serves its video to a signed-in session, so it cannot be downloaded anonymously.'
+        );
       case 'NOT_FOUND':
         return 'Reel not found or has been deleted';
       case 'PRIVATE_CONTENT':
