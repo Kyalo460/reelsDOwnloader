@@ -16,6 +16,7 @@ import {
   getInstagramSession,
   getInstagramSessionFailure,
   initializeInstagramSession,
+  installSuppliedCookies,
 } from '@/services/media/InstagramSession';
 
 /**
@@ -47,17 +48,44 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const denied = requireAdminAuth(request);
   if (denied) return denied;
 
-  let body: { username?: string; password?: string; twoFactorSecret?: string };
+  let body: { username?: string; password?: string; twoFactorSecret?: string; cookies?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: 'Request body must be JSON' }, { status: 400 });
   }
 
-  const { username, password, twoFactorSecret } = body;
+  const { username, password, twoFactorSecret, cookies } = body;
+
+  // Cookie installation needs no browser, so it is the only mode that works on
+  // a serverless deployment - and it is the cheap way to refresh an expiring
+  // session without editing environment variables and redeploying.
+  if (typeof cookies === 'string' && cookies.trim().length > 0) {
+    const result = await installSuppliedCookies(cookies);
+
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+
+    const session = getInstagramSession();
+
+    return NextResponse.json({
+      success: true,
+      source: session?.source ?? 'supplied-cookies',
+      cookieCount: session?.cookies.length ?? 0,
+      expiresAt: session?.expiresAt ?? null,
+      // False when there is no database: the session then lives only in this
+      // instance's memory and is lost on the next cold start.
+      persisted: result.persisted,
+      ...(result.warning ? { warning: result.warning } : {}),
+    });
+  }
 
   if (!username || !password) {
-    return NextResponse.json({ error: 'username and password are required' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Provide either "cookies" or "username" and "password".' },
+      { status: 400 }
+    );
   }
 
   try {
@@ -65,6 +93,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
+      source: session.source,
       expiresAt: session.expiresAt,
       cookieCount: session.cookies.length,
     });

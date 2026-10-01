@@ -22,6 +22,11 @@ import {
   toResolutionResult,
   type ExtractedMedia,
 } from './DirectUrlProcessor';
+import {
+  invalidateStoredInstagramSession,
+  readStoredInstagramSession,
+  writeStoredInstagramSession,
+} from './instagramSessionStore';
 import type { MediaResolutionResult } from '@/types';
 
 /** Instagram's public web client id. Requests to the internal API must send it. */
@@ -165,6 +170,43 @@ function cookiesFromEnv(): Cookie[] | null {
       return null;
     }
   }
+  return parseCookieHeader(raw);
+}
+
+/** A session built from supplied cookies, or null when none are configured. */
+function suppliedCookieSession(): InstagramSession | null {
+  const cookies = cookiesFromEnv();
+  if (!cookies) return null;
+
+  return sessionFromCookies(cookies);
+}
+
+/**
+ * Validates a cookie set and builds a session, or records why it cannot.
+ *
+ * Split from suppliedCookieSession so the same validation applies to cookies
+ * arriving from the database, which have not been through the env parser.
+ */
+function sessionFromCookies(cookies: Cookie[]): InstagramSession | null {
+  if (!cookies.some((cookie) => cookie.name === 'sessionid')) {
+    globalForSession.igFailure =
+      'The Instagram cookies contain no "sessionid" cookie, so they cannot authenticate. ' +
+      'Copy it while signed in to Instagram.';
+    return null;
+  }
+
+  return {
+    cookies,
+    userAgent: process.env.INSTAGRAM_USER_AGENT?.trim() || DESKTOP_USER_AGENT,
+    // Cookies carry their own expiry, but nothing here re-reads it, so this is
+    // a refresh checkpoint rather than a claim about Instagram's session life.
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    source: 'supplied-cookies',
+  };
+}
+
+/** Parses a cookie header string into Playwright cookie objects. */
+function parseCookieHeader(raw: string): Cookie[] {
   const cookies: Cookie[] = [];
 
   for (const pair of raw.split(';')) {
@@ -188,29 +230,7 @@ function cookiesFromEnv(): Cookie[] | null {
     });
   }
 
-  return cookies.length > 0 ? cookies : null;
-}
-
-/** A session built from supplied cookies, or null when none are configured. */
-function suppliedCookieSession(): InstagramSession | null {
-  const cookies = cookiesFromEnv();
-  if (!cookies) return null;
-
-  if (!cookies.some((cookie) => cookie.name === 'sessionid')) {
-    globalForSession.igFailure =
-      'INSTAGRAM_SESSION_COOKIES is set but contains no "sessionid" cookie, ' +
-      'so it cannot authenticate. Re-export the cookies while signed in to Instagram.';
-    return null;
-  }
-
-  return {
-    cookies,
-    userAgent: process.env.INSTAGRAM_USER_AGENT?.trim() || DESKTOP_USER_AGENT,
-    // Cookies carry their own expiry, but nothing here re-reads it, so this is
-    // a refresh checkpoint rather than a claim about Instagram's session life.
-    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
-    source: 'supplied-cookies',
-  };
+  return cookies;
 }
 
 /**
@@ -818,6 +838,84 @@ function isEphemeralHost(): boolean {
   );
 }
 
+/**
+ * Installs a session from cookies supplied at runtime.
+ *
+ * This exists because refreshing cookies is the routine maintenance task on a
+ * deployment that cannot run a browser. Routing that through the deployment's
+ * environment means a re-export needs a config change and a redeploy; accepting
+ * it over the API means one request, which on a cold-starting serverless host
+ * is the difference between seconds and minutes of downtime.
+ *
+ * Returns an error string instead of throwing, so a malformed value produces a
+ * 400 with the reason rather than a 500.
+ */
+export function setSuppliedCookies(raw: string): { ok: true } | { ok: false; error: string } {
+  const previousEnvValue = process.env.INSTAGRAM_SESSION_COOKIES;
+  process.env.INSTAGRAM_SESSION_COOKIES = raw;
+
+  const cookies = cookiesFromEnv();
+  const failure = globalForSession.igFailure;
+
+  const restoreEnv = () => {
+    if (previousEnvValue === undefined) delete process.env.INSTAGRAM_SESSION_COOKIES;
+    else process.env.INSTAGRAM_SESSION_COOKIES = previousEnvValue;
+  };
+
+  if (!cookies || !cookies.some((cookie) => cookie.name === 'sessionid')) {
+    globalForSession.igFailure = null;
+    restoreEnv();
+
+    return {
+      ok: false,
+      error:
+        failure ??
+        'The supplied cookies contain no "sessionid" cookie, so they cannot authenticate. ' +
+          'Copy it while signed in to Instagram.',
+    };
+  }
+
+  const session = sessionFromCookies(cookies)!;
+  session.userAgent = process.env.INSTAGRAM_USER_AGENT?.trim() || DESKTOP_USER_AGENT;
+
+  globalForSession.igSession = session;
+  globalForSession.igCookieFingerprint = raw.trim();
+  globalForSession.igFailure = null;
+
+  return { ok: true };
+}
+
+/**
+ * Installs a session from cookies and persists it, so it survives a cold start.
+ *
+ * This is the durable counterpart to setSuppliedCookies. On a serverless
+ * deployment the in-memory copy is discarded between invocations, so a session
+ * that is not written down stops working exactly when it is most inconvenient.
+ * A database outage is reported rather than thrown, because the in-memory
+ * session is still usable for the life of the warm instance.
+ */
+export async function installSuppliedCookies(
+  raw: string
+): Promise<{ ok: true; persisted: boolean; warning?: string } | { ok: false; error: string }> {
+  const result = setSuppliedCookies(raw);
+  if (!result.ok) return result;
+
+  const stored = await writeStoredInstagramSession({
+    cookies: raw.trim(),
+    userAgent: getInstagramSession()?.userAgent,
+  });
+
+  if (!stored.ok) {
+    return {
+      ok: true,
+      persisted: false,
+      warning: `${stored.error} The session works until this instance restarts.`,
+    };
+  }
+
+  return { ok: true, persisted: true };
+}
+
 /** Re-authenticates in the background when the stored session has lapsed. */
 async function ensureFreshSession(): Promise<InstagramSession | null> {
   const configuredCookies = process.env.INSTAGRAM_SESSION_COOKIES?.trim() ?? '';
@@ -848,6 +946,23 @@ async function ensureFreshSession(): Promise<InstagramSession | null> {
     globalForSession.igCookieFingerprint = configuredCookies;
     globalForSession.igFailure = null;
     return supplied;
+  }
+
+  // Nothing in the environment: fall back to the stored session. This is the
+  // path that matters on a serverless deployment, where the environment is
+  // fixed at build time and in-memory state does not survive a cold start.
+  const stored = await readStoredInstagramSession();
+  if (stored) {
+    const restored = sessionFromCookies(parseCookieHeader(stored.cookies));
+    if (restored) {
+      globalForSession.igSession = {
+        ...restored,
+        userAgent: stored.userAgent?.trim() || restored.userAgent,
+      };
+      globalForSession.igCookieFingerprint = stored.cookies.trim();
+      globalForSession.igFailure = null;
+      return globalForSession.igSession;
+    }
   }
 
   // Preserve a cookie-specific diagnosis. If the cookies were configured but
@@ -995,6 +1110,9 @@ export async function fetchWithSession(
       // 401/403 mean the session is no longer valid for this content.
       if (response.status === 401 || response.status === 403) {
         globalForSession.igSession = null;
+        // Recorded durably too, or a cold start would resurrect cookies that
+        // Instagram has already rejected and retry them on every request.
+        void invalidateStoredInstagramSession();
         globalForSession.igFailure = `Instagram rejected the session (HTTP ${response.status}). The cookies may have expired - re-export them while signed in to Instagram.`;
         return null;
       }

@@ -124,3 +124,21 @@ model RateLimitEntry {
   @@index([windowStart])
   @@index([expiresAt])
 }
+
+/// The Instagram session used for reels Instagram only serves to signed-in requests.
+///
+/// Stored in the database rather than an environment variable because a Vercel
+/// deployment is an immutable artifact: env var changes only take effect on a
+/// redeploy, and in-memory state is discarded on every cold start. A row read at
+/// request time makes refreshing the session one write, with no rebuild and no
+/// downtime.
+model InstagramSessionStore {
+  id         String   @id @default("default")
+  /// Full cookie header, as copied from a signed-in browser.
+  cookies    String
+  userAgent  String?
+  /// Set when a read confirmed the cookies are no longer accepted.
+  invalidatedAt DateTime?
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+}

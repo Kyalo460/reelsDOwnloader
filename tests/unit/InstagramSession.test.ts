@@ -358,11 +358,13 @@ describe('InstagramSession', () => {
       expect(service.getInstagramCookieHeader()).toBeNull();
 
       // The missing cookie is the one thing an operator can act on, so the
-      // message has to name it rather than just report a failure.
+      // message has to name it rather than just report a failure. It no longer
+      // names INSTAGRAM_SESSION_COOKIES, because the same validation now also
+      // covers cookies restored from the database.
       const failure = service.getInstagramSessionFailure();
       expect(failure).toBe(
-        'INSTAGRAM_SESSION_COOKIES is set but contains no "sessionid" cookie, ' +
-          'so it cannot authenticate. Re-export the cookies while signed in to Instagram.'
+        'The Instagram cookies contain no "sessionid" cookie, ' +
+          'so they cannot authenticate. Copy it while signed in to Instagram.'
       );
     });
 
