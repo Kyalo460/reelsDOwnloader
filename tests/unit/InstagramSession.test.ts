@@ -229,6 +229,353 @@ describe('InstagramSession', () => {
     });
   });
 
+  describe('supplied cookies session', () => {
+    // Supplied cookies are the only mode that works on a host where Chromium
+    // cannot be installed (a serverless sandbox), and they are read fresh from
+    // the environment on every attempt - nothing about them is cached the way
+    // credentials are.
+    //
+    // The parse itself lives in two unexported functions, so the only way to
+    // observe a built session is through the code path that triggers them:
+    // fetchWithSession -> ensureFreshSession. Rather than hit the network,
+    // `fetch` is stubbed to answer 404, which makes the request loop a no-op
+    // while still running ensureFreshSession exactly as production would. The
+    // 404 (rather than 401/403) matters: 401/403 nulls the session out.
+    // initializeInstagramSession is never called, so no browser is launched.
+
+    const resetSessionGlobals = (): void => {
+      delete (globalThis as { igSession?: unknown }).igSession;
+      delete (globalThis as { igCredentials?: unknown }).igCredentials;
+      delete (globalThis as { igFailure?: unknown }).igFailure;
+      delete (globalThis as { igLoginInFlight?: unknown }).igLoginInFlight;
+    };
+
+    /** Stubs the network so the session-building path runs without Instagram. */
+    const stubInstagramNetwork = (): void => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({
+          ok: false,
+          status: 404,
+          text: async () => '',
+        }))
+      );
+    };
+
+    /** A shortcode valid for shortcodeToMediaId, so no failure precedes the fetch. */
+    const SHORT_CODE = 'DbY4CmbMZ43';
+
+    beforeEach(() => {
+      resetSessionGlobals();
+      // Credentials are deliberately cleared so each case measures the cookie
+      // path alone; supplying them would open the login fallback.
+      vi.stubEnv('INSTAGRAM_USERNAME', '');
+      vi.stubEnv('INSTAGRAM_PASSWORD', '');
+      vi.stubEnv('INSTAGRAM_2FA_SECRET', '');
+      vi.stubEnv('INSTAGRAM_USER_AGENT', '');
+      vi.stubEnv('INSTAGRAM_SESSION_COOKIES', '');
+      stubInstagramNetwork();
+      vi.resetModules();
+    });
+
+    afterEach(() => {
+      resetSessionGlobals();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      vi.doUnmock('playwright');
+      vi.resetModules();
+    });
+
+    const loadWithCookies = async (raw: string) => {
+      vi.stubEnv('INSTAGRAM_SESSION_COOKIES', raw);
+      vi.resetModules();
+      return import('@/services/media/InstagramSession');
+    };
+
+    /** Runs the session-building path and returns the module plus the result. */
+    const buildSession = async (raw: string) => {
+      const service = await loadWithCookies(raw);
+      const result = await service.fetchWithSession(SHORT_CODE, 'reel');
+      return { service, result };
+    };
+
+    it('arms the automatic path from a cookie header alone', async () => {
+      const service = await loadWithCookies('sessionid=abc123; csrftoken=def456');
+
+      expect(service.canAttemptInstagramSession()).toBe(true);
+    });
+
+    it('builds a supplied-cookies session with the parsed cookie names and values', async () => {
+      const { service, result } = await buildSession('sessionid=abc123; csrftoken=def456');
+
+      // The stubbed fetch finds no media, so the read itself fails - what
+      // matters here is that a session existed and where it came from.
+      expect(result).toBeNull();
+
+      const session = service.getInstagramSession();
+      expect(session).not.toBeNull();
+      expect(session?.source).toBe('supplied-cookies');
+
+      expect(session?.cookies.map((cookie) => [cookie.name, cookie.value])).toEqual([
+        ['sessionid', 'abc123'],
+        ['csrftoken', 'def456'],
+      ]);
+
+      // A replayed cookie header is only useful if it reaches the wire intact.
+      expect(service.getInstagramCookieHeader()).toBe('sessionid=abc123; csrftoken=def456');
+      expect(service.isInstagramSessionConfigured()).toBe(true);
+    });
+
+    it('scopes parsed cookies to Instagram with a session expiry of -1', async () => {
+      const { service } = await buildSession('sessionid=abc123');
+
+      expect(service.getInstagramSession()?.cookies).toEqual([
+        {
+          name: 'sessionid',
+          value: 'abc123',
+          domain: '.instagram.com',
+          path: '/',
+          expires: -1,
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Lax',
+        },
+      ]);
+    });
+
+    it('honours INSTAGRAM_USER_AGENT for the replayed session', async () => {
+      vi.stubEnv('INSTAGRAM_USER_AGENT', 'CustomAgent/1.0');
+      const { service } = await buildSession('sessionid=abc123');
+
+      expect(service.getInstagramSession()?.userAgent).toBe('CustomAgent/1.0');
+    });
+
+    it('rejects cookies that carry no sessionid and says so', async () => {
+      const { service, result } = await buildSession('csrftoken=def456; mid=xyz');
+
+      expect(result).toBeNull();
+      expect(service.getInstagramSession()).toBeNull();
+      expect(service.getInstagramCookieHeader()).toBeNull();
+
+      // The missing cookie is the one thing an operator can act on, so the
+      // message has to name it rather than just report a failure.
+      const failure = service.getInstagramSessionFailure();
+      expect(failure).toBe(
+        'INSTAGRAM_SESSION_COOKIES is set but contains no "sessionid" cookie, ' +
+          'so it cannot authenticate. Re-export the cookies while signed in to Instagram.'
+      );
+    });
+
+    it('accepts a JSON array of browser-exported cookie objects', async () => {
+      const exported = [
+        { name: 'sessionid', value: 'json-array-1', domain: '.instagram.com', path: '/' },
+        { name: 'csrftoken', value: 'json-array-2', domain: '.instagram.com', path: '/' },
+      ];
+
+      const { service } = await buildSession(JSON.stringify(exported));
+
+      const session = service.getInstagramSession();
+      expect(session?.source).toBe('supplied-cookies');
+      expect(session?.cookies.map((cookie) => [cookie.name, cookie.value])).toEqual([
+        ['sessionid', 'json-array-1'],
+        ['csrftoken', 'json-array-2'],
+      ]);
+    });
+
+    it('normalises optional fields on an exported cookie object', async () => {
+      // Extension exports vary in which optional fields they include, and the
+      // defaults are what makes a hand-picked export work at all.
+      const { service } = await buildSession(
+        JSON.stringify([
+          { name: 'sessionid', value: 'bare' },
+          {
+            name: 'csrftoken',
+            value: 'full',
+            domain: 'www.instagram.com',
+            path: '/api',
+            expires: 1893456000,
+            httpOnly: true,
+            secure: false,
+          },
+        ])
+      );
+
+      expect(service.getInstagramSession()?.cookies).toEqual([
+        {
+          name: 'sessionid',
+          value: 'bare',
+          domain: '.instagram.com',
+          path: '/',
+          expires: -1,
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Lax',
+        },
+        {
+          name: 'csrftoken',
+          value: 'full',
+          domain: 'www.instagram.com',
+          path: '/api',
+          expires: 1893456000,
+          httpOnly: true,
+          // secure:false in the export is honoured, so an insecure cookie does
+          // not get silently upgraded to secure.
+          secure: false,
+          sameSite: 'Lax',
+        },
+      ]);
+    });
+
+    it('drops exported entries that are not name/value cookie objects', async () => {
+      const { service } = await buildSession(
+        JSON.stringify([
+          { name: 'sessionid', value: 'good' },
+          { name: 'missing-value' },
+          { value: 'missing-name' },
+          null,
+          'not-an-object',
+        ])
+      );
+
+      expect(service.getInstagramSession()?.cookies.map((cookie) => cookie.name)).toEqual([
+        'sessionid',
+      ]);
+    });
+
+    it('accepts a JSON object carrying a cookies array', async () => {
+      // The shape several browser-cookie exporters emit.
+      const { service } = await buildSession(
+        JSON.stringify({
+          version: 1,
+          cookies: [
+            { name: 'sessionid', value: 'nested-1', domain: '.instagram.com' },
+            { name: 'ds_user_id', value: 'nested-2', domain: '.instagram.com' },
+          ],
+        })
+      );
+
+      const session = service.getInstagramSession();
+      expect(session?.source).toBe('supplied-cookies');
+      expect(session?.cookies.map((cookie) => [cookie.name, cookie.value])).toEqual([
+        ['sessionid', 'nested-1'],
+        ['ds_user_id', 'nested-2'],
+      ]);
+    });
+
+    it('rejects malformed JSON without throwing', async () => {
+      for (const raw of ['[{not json', '{ "cookies": [ }', '[[[']) {
+        const { service, result } = await buildSession(raw);
+
+        expect(result).toBeNull();
+        expect(service.getInstagramSession()).toBeNull();
+
+        expect(service.getInstagramSessionFailure()).toBe(
+          'INSTAGRAM_SESSION_COOKIES looks like JSON but could not be parsed.'
+        );
+      }
+    });
+
+    it('rejects JSON that parses but carries no usable cookie', async () => {
+      for (const raw of ['[]', '{}', '{"cookies": []}', '[{"name":"sessionid"}]']) {
+        const { service } = await buildSession(raw);
+
+        expect(service.getInstagramSession()).toBeNull();
+      }
+    });
+
+    it('parses awkward cookie headers', async () => {
+      const { service } = await buildSession(
+        '  sessionid = abc=def ;  ;  csrftoken=ghi  ; ; ds_user_id=42'
+      );
+
+      const session = service.getInstagramSession();
+      expect(session?.source).toBe('supplied-cookies');
+      expect(session?.cookies.map((cookie) => [cookie.name, cookie.value])).toEqual([
+        // Only the first `=` separates, so a base64-padded value survives.
+        ['sessionid', 'abc=def'],
+        ['csrftoken', 'ghi'],
+        ['ds_user_id', '42'],
+      ]);
+    });
+
+    it('keeps the cookie reason visible when the login fallback also fails', async () => {
+      // Credentials are the documented fallback, so a bad cookie export does not
+      // end the attempt by itself. The actionable cookie message must survive
+      // that fallback: the export is what the operator actually got wrong, and a
+      // later login error overwriting it would send them debugging the wrong
+      // problem.
+      //
+      // Playwright is mocked to fail on launch; without that this path starts a
+      // real browser and the test would time out rather than assert anything.
+      vi.doMock('playwright', () => ({
+        chromium: {
+          launch: vi.fn(async () => {
+            throw new Error('browser launch unavailable in tests');
+          }),
+        },
+      }));
+      vi.stubEnv('INSTAGRAM_USERNAME', 'env-user');
+      vi.stubEnv('INSTAGRAM_PASSWORD', 'env-pass');
+
+      const { service, result } = await buildSession('csrftoken=def456');
+
+      expect(result).toBeNull();
+      expect(service.getInstagramSession()).toBeNull();
+
+      const failure = service.getInstagramSessionFailure();
+      expect(failure).toContain('sessionid');
+      // The login failure is still reported, just not in place of the cause.
+      expect(failure).toContain('browser launch unavailable in tests');
+    });
+
+    it('records the missing-sessionid reason on the global before any fallback runs', async () => {
+      // The message is assigned synchronously inside the cookie attempt, so it
+      // is observable without waiting for - or reaching - the login fallback.
+      vi.doMock('playwright', () => ({
+        chromium: {
+          launch: vi.fn(async () => {
+            throw new Error('browser launch unavailable in tests');
+          }),
+        },
+      }));
+      vi.stubEnv('INSTAGRAM_USERNAME', 'env-user');
+      vi.stubEnv('INSTAGRAM_PASSWORD', 'env-pass');
+      vi.stubEnv('INSTAGRAM_SESSION_COOKIES', 'csrftoken=def456');
+      vi.resetModules();
+      const service = await import('@/services/media/InstagramSession');
+
+      void service.fetchWithSession(SHORT_CODE, 'reel').catch(() => undefined);
+
+      expect(service.getInstagramSessionFailure()).toContain('sessionid');
+    });
+
+    it('leaves the automatic path off with neither cookies nor credentials', async () => {
+      const service = await loadWithCookies('');
+
+      expect(service.canAttemptInstagramSession()).toBe(false);
+    });
+
+    it('treats a whitespace-only cookie value as unconfigured', async () => {
+      const service = await loadWithCookies('   ');
+
+      expect(service.canAttemptInstagramSession()).toBe(false);
+    });
+
+    it('picks up re-exported cookies without waiting for the session to expire', async () => {
+      const { service } = await buildSession('sessionid=first');
+      expect(service.getInstagramSession()?.cookies[0]?.value).toBe('first');
+
+      // Same module instance, new environment. A stored session lasts a day, but
+      // operators re-export whenever Instagram expires their cookies - and on a
+      // serverless host, where re-exporting is the normal recovery, a stale
+      // session would look exactly like the fix not having worked.
+      vi.stubEnv('INSTAGRAM_SESSION_COOKIES', 'sessionid=second');
+      await service.fetchWithSession(SHORT_CODE, 'reel');
+
+      expect(service.getInstagramSession()?.cookies[0]?.value).toBe('second');
+    });
+  });
+
   describe('shortcodeToMediaId', () => {
     // Instagram's internal media endpoint rejects a shortcode with
     // "Invalid media_id" and only accepts the decoded numeric id, so this

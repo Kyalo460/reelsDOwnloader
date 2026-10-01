@@ -86,6 +86,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // InstagramSession never has anything to sign in with.
     credentialsConfigured: canAttemptInstagramSession(),
     authenticated: session !== null,
+    // 'supplied-cookies' needs no browser, so it is the mode that works on a
+    // host where Chromium cannot be installed.
+    source: session?.source ?? null,
+    browserRequired: session === null || session.source === 'login',
     expiresAt: session?.expiresAt ?? null,
     cookieCount: session?.cookies.length ?? 0,
     lastFailure: getInstagramSessionFailure(),

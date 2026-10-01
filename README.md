@@ -80,6 +80,56 @@ See `.env.example` for all available configuration options.
 | `RATE_LIMIT_WINDOW`       | Rate limit window in seconds         | No (default: 60)    |
 | `RATE_LIMIT_MAX_REQUESTS` | Max requests per window              | No (default: 30)    |
 
+### Instagram Session Setup
+
+Instagram withholds the video file from anonymous visitors for some reels. When
+that happens the resolver falls back to an authenticated read, which needs a
+signed-in session. A session is optional: with none configured, everything else
+keeps working anonymously.
+
+There are two ways to provide one, and cookies are preferred.
+
+**Option 1 (recommended): supplied cookies.** Set `INSTAGRAM_SESSION_COOKIES`
+to cookies copied from a real browser. This needs no browser on the server at
+all, so it is the only option that works on a serverless host, where the
+filesystem is ephemeral and no Chromium can be installed. It also avoids
+automated login, which is the behavior Instagram is most likely to challenge.
+
+To obtain the cookies:
+
+1. Sign in to instagram.com in a normal browser using a throwaway account.
+2. Open devtools and go to **Application > Cookies > https://www.instagram.com**
+   (a cookies-export extension works as well and saves a step).
+3. Copy the `name` and `value` of each cookie for the `instagram.com` domain and
+   join them into one string: `name=value; name=value`.
+4. Put that string in `INSTAGRAM_SESSION_COOKIES`. The raw JSON array that an
+   export extension produces is also accepted directly.
+
+A `sessionid` cookie must be included or the session is rejected. `sessionid` and
+`csrftoken` are the pair that matters:
+
+```bash
+INSTAGRAM_SESSION_COOKIES=sessionid=...; csrftoken=...
+```
+
+**Option 2: automated login.** Set `INSTAGRAM_USERNAME` and
+`INSTAGRAM_PASSWORD`, plus `INSTAGRAM_2FA_SECRET` if the account uses
+authenticator 2FA. The app signs in with Playwright on first use. This requires
+a Chromium: a locally installed Chrome or Edge (auto-detected), or Playwright's
+bundled build via `npx playwright install chromium`.
+
+Supplied cookies always win over automated login when both are configured.
+
+> **Warning:** These cookies grant full access to the Instagram account they
+> came from — anyone holding them can post, message, and change account
+> settings. Use a throwaway account, never a personal one, and never commit the
+> cookies or `.env` to version control. `.env` is gitignored; the cookies belong
+> in it and nowhere else.
+
+> **Warning:** Automating an Instagram login violates Instagram's Terms of Use
+> and is the single most likely reason the account gets banned. Option 1 avoids
+> that entirely, which is one more reason to prefer it.
+
 ## API Endpoints
 
 ### POST /api/reels/resolve

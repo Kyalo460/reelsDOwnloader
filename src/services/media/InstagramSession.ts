@@ -41,6 +41,11 @@ export interface InstagramSession {
   cookies: Cookie[];
   userAgent: string;
   expiresAt: number;
+  /**
+   * How the session was obtained. A supplied-cookie session skips the browser
+   * entirely, which matters on hosts where no Chromium can be installed.
+   */
+  source: 'login' | 'supplied-cookies';
 }
 
 const globalForSession = globalThis as unknown as {
@@ -56,6 +61,13 @@ const globalForSession = globalThis as unknown as {
   igCredentials?: InstagramCredentials | null;
   igLoginInFlight?: Promise<InstagramSession | null> | null;
   igFailure?: string | null;
+  igCookiesEvaluated?: boolean;
+  /**
+   * The exact INSTAGRAM_SESSION_COOKIES value the current supplied session was
+   * built from, so a re-export is noticed immediately rather than being masked
+   * by the stored session until its TTL lapses.
+   */
+  igCookieFingerprint?: string | null;
 };
 
 /**
@@ -97,6 +109,108 @@ function ensureCredentialsSeeded(): void {
   if (globalForSession.igCredentials === undefined) {
     globalForSession.igCredentials = credentialsFromEnv();
   }
+}
+
+/**
+ * Session cookies supplied directly, if the operator provided them.
+ *
+ * This is the only mode that works on a host where Chromium cannot be
+ * installed - a serverless sandbox, most notably, where the filesystem is
+ * ephemeral and every cold start begins with no browser and no login. Sign in
+ * once in a real browser, export the cookies, and the app replays them.
+ *
+ * It also sidesteps automated login entirely, which is the behaviour most
+ * likely to get an account flagged.
+ *
+ * Accepts either a cookie header ("a=1; b=2") or a JSON array of
+ * browser-exported cookie objects, since both are what people actually have.
+ */
+function cookiesFromEnv(): Cookie[] | null {
+  const raw = process.env.INSTAGRAM_SESSION_COOKIES?.trim();
+  if (!raw) return null;
+
+  // Browser extensions and devtools export JSON; accept that shape directly.
+  if (raw.startsWith('[') || raw.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const list = Array.isArray(parsed)
+        ? parsed
+        : ((parsed as { cookies?: unknown[] } | null)?.cookies ?? []);
+
+      const cookies = (list as Array<Record<string, unknown>>)
+        .filter((entry) => typeof entry?.name === 'string' && typeof entry?.value === 'string')
+        .map((entry) => ({
+          name: entry.name as string,
+          value: entry.value as string,
+          domain: typeof entry.domain === 'string' ? entry.domain : '.instagram.com',
+          path: typeof entry.path === 'string' ? entry.path : '/',
+          // -1 is Playwright's "session cookie, no expiry", which is what these
+          // are. Re-expiry is handled by the session TTL, not the cookie.
+          expires: typeof entry.expires === 'number' ? entry.expires : -1,
+          httpOnly: entry.httpOnly === true,
+          secure: entry.secure !== false,
+          sameSite: 'Lax' as const,
+        }));
+
+      if (cookies.length === 0) {
+        globalForSession.igFailure =
+          'INSTAGRAM_SESSION_COOKIES contains JSON but no usable cookies were found in it.';
+        return null;
+      }
+
+      return cookies;
+    } catch {
+      globalForSession.igFailure =
+        'INSTAGRAM_SESSION_COOKIES looks like JSON but could not be parsed.';
+      return null;
+    }
+  }
+  const cookies: Cookie[] = [];
+
+  for (const pair of raw.split(';')) {
+    const separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+
+    const name = pair.slice(0, separator).trim();
+    const value = pair.slice(separator + 1).trim();
+    if (!name) continue;
+
+    cookies.push({
+      name,
+      value,
+      domain: '.instagram.com',
+      path: '/',
+      // Session cookie; expiry is tracked by the session TTL instead.
+      expires: -1,
+      httpOnly: false,
+      secure: true,
+      sameSite: 'Lax',
+    });
+  }
+
+  return cookies.length > 0 ? cookies : null;
+}
+
+/** A session built from supplied cookies, or null when none are configured. */
+function suppliedCookieSession(): InstagramSession | null {
+  const cookies = cookiesFromEnv();
+  if (!cookies) return null;
+
+  if (!cookies.some((cookie) => cookie.name === 'sessionid')) {
+    globalForSession.igFailure =
+      'INSTAGRAM_SESSION_COOKIES is set but contains no "sessionid" cookie, ' +
+      'so it cannot authenticate. Re-export the cookies while signed in to Instagram.';
+    return null;
+  }
+
+  return {
+    cookies,
+    userAgent: process.env.INSTAGRAM_USER_AGENT?.trim() || DESKTOP_USER_AGENT,
+    // Cookies carry their own expiry, but nothing here re-reads it, so this is
+    // a refresh checkpoint rather than a claim about Instagram's session life.
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    source: 'supplied-cookies',
+  };
 }
 
 /**
@@ -596,6 +710,7 @@ async function performLogin(): Promise<InstagramSession> {
       // Instagram sessions are server-side revocable with no published TTL.
       // A day is a conservative refresh interval, not a documented limit.
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      source: 'login',
     };
   } finally {
     await page.close().catch(() => undefined);
@@ -657,7 +772,10 @@ export function isInstagramSessionConfigured(): boolean {
  */
 export function canAttemptInstagramSession(): boolean {
   ensureCredentialsSeeded();
-  return globalForSession.igCredentials !== null;
+  return (
+    globalForSession.igCredentials !== null ||
+    (process.env.INSTAGRAM_SESSION_COOKIES?.trim().length ?? 0) > 0
+  );
 }
 
 /** Cookie header value for the current session, or null when signed out. */
@@ -676,6 +794,7 @@ export async function closeInstagramSession(): Promise<void> {
   globalForSession.igSession = null;
   globalForSession.igContext = null;
   globalForSession.igBrowser = null;
+  globalForSession.igCookieFingerprint = null;
 
   await context?.close().catch(() => undefined);
   await browser?.close().catch(() => undefined);
@@ -683,14 +802,48 @@ export async function closeInstagramSession(): Promise<void> {
 
 /** Re-authenticates in the background when the stored session has lapsed. */
 async function ensureFreshSession(): Promise<InstagramSession | null> {
+  const configuredCookies = process.env.INSTAGRAM_SESSION_COOKIES?.trim() ?? '';
+
+  // A re-exported cookie string must take effect immediately. Without this the
+  // stored session wins until its TTL lapses, so an operator refreshing expired
+  // cookies would see no change for up to a day - and on a serverless host,
+  // where re-exporting is the normal way to recover, that looks exactly like
+  // the fix not having worked.
+  if (
+    globalForSession.igSession?.source === 'supplied-cookies' &&
+    globalForSession.igCookieFingerprint !== configuredCookies
+  ) {
+    globalForSession.igSession = null;
+  }
+
   const existing = getInstagramSession();
   if (existing) return existing;
+
+  // Supplied cookies win over automated login, unconditionally. They need no
+  // browser, which is the only way this works on a host that cannot install
+  // Chromium, and they avoid the automated login Instagram is most likely to
+  // challenge. Credentials are the fallback for anyone who would rather not
+  // paste a session cookie into their environment.
+  const supplied = suppliedCookieSession();
+  if (supplied) {
+    globalForSession.igSession = supplied;
+    globalForSession.igCookieFingerprint = configuredCookies;
+    globalForSession.igFailure = null;
+    return supplied;
+  }
+
+  // Preserve a cookie-specific diagnosis. If the cookies were configured but
+  // unusable, that is the actionable fact, and letting a later login failure
+  // overwrite it would leave the operator debugging the wrong problem.
+  const cookieFailure = globalForSession.igFailure ?? null;
 
   ensureCredentialsSeeded();
 
   if (!globalForSession.igCredentials) {
     globalForSession.igFailure =
-      'No Instagram account is configured, so no signed-in session is available.';
+      cookieFailure ??
+      'No Instagram session is configured. Set INSTAGRAM_SESSION_COOKIES, ' +
+        'or INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD to sign in automatically.';
     return null;
   }
 
@@ -704,9 +857,16 @@ async function ensureFreshSession(): Promise<InstagramSession | null> {
       .catch((error: unknown) => {
         // The reason a login failed is the single most useful thing to surface.
         // Without it every failure mode collapses into one anonymous-looking
-        // error and there is nothing to act on.
-        globalForSession.igFailure =
+        // error and there is nothing to act on. A pre-existing cookie problem is
+        // kept alongside it, since when both are configured the cookie export is
+        // usually the one the operator got wrong.
+        const loginFailure =
           error instanceof Error ? error.message : 'Instagram login failed for an unknown reason';
+
+        globalForSession.igFailure = cookieFailure
+          ? `${cookieFailure}\n  (Automated login was also attempted and failed: ${loginFailure})`
+          : loginFailure;
+
         return null;
       })
       .finally(() => {
@@ -769,63 +929,82 @@ export async function fetchWithSession(
     // it is kept as a cheap second chance in case the endpoint form changes.
     { url: base, kind: 'html' },
   ];
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
 
-  try {
-    for (const target of targets) {
-      try {
-        const response = await fetch(target.url, {
-          method: 'GET',
-          headers: {
-            'User-Agent': session.userAgent,
-            Accept:
-              target.kind === 'json'
-                ? 'application/json, text/plain, */*'
-                : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Cache-Control': 'no-cache',
-            Referer: base,
-            'X-IG-App-ID': IG_APP_ID,
-            'X-ASBD-ID': '129477',
-            'X-Requested-With': 'XMLHttpRequest',
-            Cookie: cookieHeader,
-          },
-          redirect: 'follow',
-          cache: 'no-store',
-          signal: controller.signal,
-        });
+  // Each target gets its own timeout and its own controller. One shared
+  // controller meant a single slow target aborted the whole loop and left every
+  // later target holding an already-aborted signal, so a transient hang
+  // silently disabled the fallback for the rest of the call.
+  const attempts: string[] = [];
 
-        // 401/403 mean the session is no longer valid for this content.
-        if (response.status === 401 || response.status === 403) {
-          globalForSession.igSession = null;
-          globalForSession.igFailure = `Instagram rejected the session (HTTP ${response.status}). The account may have been signed out, or the reel may be restricted.`;
-          return null;
-        }
+  for (const target of targets) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12_000);
 
-        if (!response.ok) continue;
+    try {
+      const response = await fetch(target.url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': session.userAgent,
+          Accept:
+            target.kind === 'json'
+              ? 'application/json, text/plain, */*'
+              : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          Referer: base,
+          'X-IG-App-ID': IG_APP_ID,
+          'X-ASBD-ID': '129477',
+          'X-Requested-With': 'XMLHttpRequest',
+          Cookie: cookieHeader,
+        },
+        redirect: 'follow',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
 
-        const body = await response.text();
-        const extracted: ExtractedMedia =
-          target.kind === 'json'
-            ? extractFromJson(body, shortCode)
-            : extractFromHtml(body, shortCode);
-
-        if (extracted.mediaUrl || extracted.versions.length > 0) {
-          return toResolutionResult(extracted);
-        }
-      } catch {
-        // Try the next target; a single failed endpoint is not fatal.
+      // 401/403 mean the session is no longer valid for this content.
+      if (response.status === 401 || response.status === 403) {
+        globalForSession.igSession = null;
+        globalForSession.igFailure = `Instagram rejected the session (HTTP ${response.status}). The cookies may have expired - re-export them while signed in to Instagram.`;
+        return null;
       }
+
+      attempts.push(`${target.kind} endpoint: HTTP ${response.status}`);
+
+      if (!response.ok) continue;
+
+      const body = await response.text();
+      const extracted: ExtractedMedia =
+        target.kind === 'json'
+          ? extractFromJson(body, shortCode)
+          : extractFromHtml(body, shortCode);
+
+      if (extracted.mediaUrl || extracted.versions.length > 0) {
+        return toResolutionResult(extracted);
+      }
+
+      attempts.push(`${target.kind} endpoint: responded but carried no media URL`);
+    } catch (error) {
+      attempts.push(
+        `${target.kind} endpoint: ${
+          error instanceof Error && error.name === 'AbortError'
+            ? 'timed out after 12s'
+            : error instanceof Error
+              ? error.message.split('\n')[0]
+              : String(error)
+        }`
+      );
+    } finally {
+      clearTimeout(timeout);
     }
-  } finally {
-    clearTimeout(timeout);
   }
 
-  // Logged in successfully, but Instagram still served no media URL.
+  // Signed in, but Instagram served no media URL. Which endpoints were tried,
+  // and how they answered, is the difference between "the cookies expired" and
+  // "this reel is withheld" - so it is reported rather than guessed at.
   globalForSession.igFailure =
-    'Signed in successfully, but Instagram returned no video file for this reel. ' +
-    'The reel may be restricted even to signed-in accounts, or Instagram may be withholding it from this account.';
+    'Signed in successfully, but Instagram returned no video file for this reel.\n' +
+    `  Attempts: ${attempts.length > 0 ? attempts.join('; ') : 'none completed'}`;
 
   return null;
 }
