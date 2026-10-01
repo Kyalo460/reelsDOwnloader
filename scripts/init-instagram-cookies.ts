@@ -7,20 +7,37 @@
 // standalone run like this is only a connectivity check: the Next.js server
 // needs its own login via POST /api/auth/instagram/session (or by calling
 // initializeInstagramSession during startup).
+//
+// .env is loaded with @next/env, the same loader the app uses. Without it a
+// `tsx` run sees an empty environment and reports the account as unconfigured
+// even when .env is correct.
 
+import { loadEnvConfig } from '@next/env';
 import {
   closeInstagramSession,
   initializeInstagramSession,
   resolveBrowserExecutable,
 } from '../src/services/media/InstagramSession';
 
+function loadEnvironment(): void {
+  loadEnvConfig(process.cwd(), process.env.NODE_ENV !== 'production', {
+    info() {},
+    error() {},
+  });
+}
+
 async function main(): Promise<void> {
+  loadEnvironment();
+
   const username = process.env.INSTAGRAM_USERNAME;
   const password = process.env.INSTAGRAM_PASSWORD;
   const twoFactorSecret = process.env.INSTAGRAM_2FA_SECRET;
 
   if (!username || !password) {
-    console.error('Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD before running this script.');
+    console.error(
+      'INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD are not set.\n' +
+        'Add them to .env with no leading "#", then run this again.'
+    );
     process.exitCode = 1;
     return;
   }

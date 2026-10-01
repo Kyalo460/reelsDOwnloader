@@ -5,37 +5,37 @@
 // Exists because "the reel still fails" was ambiguous: no account configured,
 // no admin key, wrong file loaded, and a refused login all produced the same
 // error. This prints which one applies, without needing a failing reel.
+//
+// The environment is loaded with @next/env - the same loader Next.js uses at
+// startup - rather than parsed here. An earlier version parsed .env for display
+// but left process.env untouched, so it reported the script's own empty
+// environment as if it were the app's, and told a correctly configured
+// deployment that its credentials "were not loaded".
 
-import {
-  canAttemptInstagramSession,
-  getInstagramSessionFailure,
-  resolveBrowserExecutable,
-} from '../src/services/media/InstagramSession';
+import { loadEnvConfig } from '@next/env';
 
-/** Values present in .env are only visible to Next.js, not to a bare tsx run. */
-async function reportFromDotEnv(): Promise<Record<string, string>> {
-  const { readFileSync, existsSync } = await import('fs');
+/** Populates process.env exactly as `next dev` / `next start` would. */
+function loadEnvironment(): void {
+  const dev = process.env.NODE_ENV !== 'production';
 
-  if (!existsSync('.env')) return {};
-
-  const parsed: Record<string, string> = {};
-
-  for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
-    const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
-    if (match?.[1]) parsed[match[1]] = (match[2] ?? '').trim();
-  }
-
-  return parsed;
+  loadEnvConfig(process.cwd(), dev, {
+    info() {},
+    error() {},
+  });
 }
 
 function describe(value: string | undefined): string {
-  if (value === undefined) return 'absent from .env';
-  if (value === '') return 'PRESENT BUT EMPTY';
+  if (value === undefined) return 'NOT SET';
+  if (value.trim() === '') return 'PRESENT BUT EMPTY';
   return `set (${value.length} chars)`;
 }
 
 async function main(): Promise<void> {
-  const dotenv = await reportFromDotEnv();
+  loadEnvironment();
+
+  // Imported after loading so the module-load credential seeding inside
+  // InstagramSession sees the same environment the app will see.
+  const session = await import('../src/services/media/InstagramSession');
 
   const keys = [
     'INSTAGRAM_USERNAME',
@@ -47,37 +47,37 @@ async function main(): Promise<void> {
   console.log('Instagram session configuration\n');
 
   for (const key of keys) {
-    const fromFile = dotenv[key];
-    const fromProcess = process.env[key];
-
-    // process.env wins at runtime; .env is what Next.js will load on start.
-    const effective = fromProcess ?? fromFile;
-    console.log(`  ${key.padEnd(22)} ${describe(effective)}`);
+    console.log(`  ${key.padEnd(22)} ${describe(process.env[key])}`);
   }
 
-  const browser = resolveBrowserExecutable();
-  console.log(`  ${'BROWSER'.padEnd(22)} ${browser ?? 'none found (needs Playwright download)'}`);
+  const browser = session.resolveBrowserExecutable();
+  console.log(
+    `  ${'BROWSER'.padEnd(22)} ${browser ?? 'NOT FOUND (run: npx playwright install chromium)'}`
+  );
   console.log('');
-
-  const username = process.env.INSTAGRAM_USERNAME ?? dotenv.INSTAGRAM_USERNAME;
-  const password = process.env.INSTAGRAM_PASSWORD ?? dotenv.INSTAGRAM_PASSWORD;
 
   let problems = 0;
 
-  if (!username || !password) {
+  if (!session.canAttemptInstagramSession()) {
     problems++;
     console.log('FALLBACK DISABLED - no Instagram account configured.');
-    console.log('  Edit .env and set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD,');
-    console.log('  with no leading "#". Then restart the app.');
+    console.log('  Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env, with no leading "#".');
     console.log('  Reels that need a signed-in session will keep failing until then.');
-  } else if (canAttemptInstagramSession()) {
-    console.log('Fallback ENABLED - credentials were read and a login will be attempted');
-    console.log('  on the first reel Instagram refuses to serve anonymously.');
-    console.log('  That first attempt takes 15-30s while the browser logs in.');
   } else {
+    console.log('Fallback ENABLED - credentials loaded; a login will be attempted on the first');
+    console.log('  reel Instagram refuses to serve anonymously (that first attempt takes ~40s).');
+
+    if (!process.env.INSTAGRAM_2FA_SECRET) {
+      console.log('');
+      console.log('  Note: INSTAGRAM_2FA_SECRET is empty. If the account uses an authenticator');
+      console.log('  app, set it or the login will stop at the code prompt.');
+    }
+  }
+
+  if (!process.env.ADMIN_API_KEY) {
     problems++;
-    console.log('FALLBACK DISABLED - credentials exist in .env but were not loaded.');
-    console.log('  The running process has not picked up .env; restart the app.');
+    console.log('');
+    console.log('ADMIN_API_KEY is not set, so /api/auth/instagram/session returns 503.');
   }
 
   if (!browser) {
@@ -86,11 +86,18 @@ async function main(): Promise<void> {
     console.log('No local Chrome/Edge found. Run: npx playwright install chromium');
   }
 
-  const failure = getInstagramSessionFailure();
+  const failure = session.getInstagramSessionFailure();
   if (failure) {
     console.log('');
     console.log(`Last session failure: ${failure}`);
   }
+
+  console.log('');
+  console.log(
+    problems > 0
+      ? 'Result: NOT ready.'
+      : 'Result: ready. Restart the app so it picks up .env, then retry the reel.'
+  );
 
   process.exitCode = problems > 0 ? 1 : 0;
 }
