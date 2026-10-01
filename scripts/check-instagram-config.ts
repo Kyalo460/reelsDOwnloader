@@ -38,6 +38,7 @@ async function main(): Promise<void> {
   const session = await import('../src/services/media/InstagramSession');
 
   const keys = [
+    'INSTAGRAM_SESSION_COOKIES',
     'INSTAGRAM_USERNAME',
     'INSTAGRAM_PASSWORD',
     'INSTAGRAM_2FA_SECRET',
@@ -47,24 +48,51 @@ async function main(): Promise<void> {
   console.log('Instagram session configuration\n');
 
   for (const key of keys) {
-    console.log(`  ${key.padEnd(22)} ${describe(process.env[key])}`);
+    console.log(`  ${key.padEnd(26)} ${describe(process.env[key])}`);
   }
 
   const browser = session.resolveBrowserExecutable();
-  console.log(
-    `  ${'BROWSER'.padEnd(22)} ${browser ?? 'NOT FOUND (run: npx playwright install chromium)'}`
-  );
+  console.log(`  ${'BROWSER'.padEnd(26)} ${browser ?? 'NOT FOUND'}`);
   console.log('');
+
+  const hasCookies = (process.env.INSTAGRAM_SESSION_COOKIES?.trim().length ?? 0) > 0;
+  const hasCredentials =
+    Boolean(process.env.INSTAGRAM_USERNAME) && Boolean(process.env.INSTAGRAM_PASSWORD);
+  const serverless =
+    process.env.VERCEL === '1' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.NETLIFY) ||
+    process.env.K_SERVICE !== undefined;
+
+  if (serverless) {
+    console.log('HOST: serverless - a browser cannot run here.');
+    console.log('  INSTAGRAM_SESSION_COOKIES is the only mode that will work.');
+    console.log('');
+  }
 
   let problems = 0;
 
   if (!session.canAttemptInstagramSession()) {
     problems++;
-    console.log('FALLBACK DISABLED - no Instagram account configured.');
-    console.log('  Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env, with no leading "#".');
+    console.log('FALLBACK DISABLED - no Instagram session configured.');
+    console.log('  Set INSTAGRAM_SESSION_COOKIES in .env, with no leading "#".');
     console.log('  Reels that need a signed-in session will keep failing until then.');
+  } else if (hasCookies) {
+    console.log('Fallback ENABLED via supplied cookies - no browser needed.');
+    if (hasCredentials) {
+      console.log('  Username/password are also set but will not be used; cookies take priority.');
+    }
+    if (!/sessionid=/.test(process.env.INSTAGRAM_SESSION_COOKIES ?? '')) {
+      problems++;
+      console.log('');
+      console.log('  WARNING: no "sessionid" cookie found. Instagram will reject this session.');
+    }
+  } else if (serverless) {
+    problems++;
+    console.log('FALLBACK WILL FAIL - credentials are set, but this host cannot run a browser.');
+    console.log('  Set INSTAGRAM_SESSION_COOKIES instead of INSTAGRAM_USERNAME/PASSWORD.');
   } else {
-    console.log('Fallback ENABLED - credentials loaded; a login will be attempted on the first');
+    console.log('Fallback ENABLED via automatic login - a browser will be launched on the first');
     console.log('  reel Instagram refuses to serve anonymously (that first attempt takes ~40s).');
 
     if (!process.env.INSTAGRAM_2FA_SECRET) {

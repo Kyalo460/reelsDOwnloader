@@ -800,6 +800,24 @@ export async function closeInstagramSession(): Promise<void> {
   await browser?.close().catch(() => undefined);
 }
 
+/**
+ * True on hosts that cannot run a browser at all.
+ *
+ * Serverless platforms have an ephemeral, read-only-ish filesystem with no
+ * Chromium and no way to install one, so an automated login can only ever fail
+ * there. Detecting it up front turns a confusing Playwright "executable doesn't
+ * exist" dump into one sentence naming the fix.
+ */
+function isEphemeralHost(): boolean {
+  return (
+    process.env.VERCEL === '1' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.FUNCTION_NAME) ||
+    Boolean(process.env.NETLIFY) ||
+    process.env.K_SERVICE !== undefined
+  );
+}
+
 /** Re-authenticates in the background when the stored session has lapsed. */
 async function ensureFreshSession(): Promise<InstagramSession | null> {
   const configuredCookies = process.env.INSTAGRAM_SESSION_COOKIES?.trim() ?? '';
@@ -844,6 +862,18 @@ async function ensureFreshSession(): Promise<InstagramSession | null> {
       cookieFailure ??
       'No Instagram session is configured. Set INSTAGRAM_SESSION_COOKIES, ' +
         'or INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD to sign in automatically.';
+    return null;
+  }
+
+  // Credentials alone are not enough here: this host cannot run a browser, so
+  // the login can only fail. Say that once, plainly, instead of letting
+  // Playwright emit its executable-not-found dump on every gated reel.
+  if (isEphemeralHost()) {
+    globalForSession.igFailure =
+      (cookieFailure ? `${cookieFailure}\n  ` : '') +
+      'This deployment cannot run a browser, so automatic Instagram login is not possible. ' +
+      'Set INSTAGRAM_SESSION_COOKIES to the cookies from a browser signed in to Instagram ' +
+      '(cookie header string, or a JSON export). No Chromium install is required in that mode.';
     return null;
   }
 
