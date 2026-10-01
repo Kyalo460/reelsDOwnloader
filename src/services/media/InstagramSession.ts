@@ -126,24 +126,121 @@ function candidateBrowsers(): string[] {
   } else if (process.platform === 'darwin') {
     candidates.push(
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium'
     );
   } else {
+    // Linux and other POSIX hosts, including containers and sandboxes where
+    // Playwright's own download was never run. Snap, flatpak, and the Debian
+    // chromium package all install to paths that are easy to miss.
     candidates.push(
       '/usr/bin/google-chrome',
       '/usr/bin/google-chrome-stable',
+      '/opt/google/chrome/chrome',
       '/usr/bin/chromium',
       '/usr/bin/chromium-browser',
-      '/usr/bin/microsoft-edge'
+      '/snap/bin/chromium',
+      '/usr/bin/microsoft-edge',
+      '/opt/microsoft/msedge/msedge',
+      '/usr/bin/brave-browser'
     );
+
+    const home = process.env.HOME;
+    if (home) {
+      candidates.push(
+        `${home}/.cache/ms-playwright` // handled separately below
+      );
+    }
+
+    // Flatpak Google Chrome.
+    const xdgDataHome = process.env.XDG_DATA_HOME || (home ? `${home}/.local/share` : null);
+    if (xdgDataHome) {
+      candidates.push(`${xdgDataHome}/flathub/apps/com.google.Chrome/current/active/files/chrome`);
+    }
   }
 
-  return candidates.filter((candidate) => existsSync(candidate));
+  return candidates.filter(
+    (candidate) => !candidate.endsWith('ms-playwright') && existsSync(candidate)
+  );
 }
 
-/** A usable browser executable path, or null to use Playwright's bundled build. */
+/** A usable browser executable path, or null when none could be found. */
 export function resolveBrowserExecutable(): string | null {
   return candidateBrowsers()[0] ?? null;
+}
+
+/**
+ * Launches a Chromium browser, trying each strategy in turn.
+ *
+ * Playwright's bundled build is only present when `npx playwright install` has
+ * been run, so relying on it as the fallback means an unhelpful
+ * "Executable doesn't exist at ...chromium_headless_shell..." error on any host
+ * where that step was skipped. A system Chrome is tried first, then Playwright's
+ * `chrome` channel (which locates a system install itself), and only then the
+ * bundled build.
+ */
+async function launchBrowser(): Promise<Browser> {
+  const executablePath = resolveBrowserExecutable();
+
+  if (executablePath) {
+    return chromium.launch({
+      headless: true,
+      executablePath,
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+  }
+
+  // No system binary was found by path. `channel: 'chrome'` asks Playwright to
+  // locate a system Google Chrome install, which covers layouts the path list
+  // above misses.
+  const attempts: Array<{ label: string; options: Parameters<typeof chromium.launch>[0] }> = [
+    {
+      label: "system Chrome (channel 'chrome')",
+      options: {
+        headless: true,
+        channel: 'chrome',
+        args: ['--disable-blink-features=AutomationControlled'],
+      },
+    },
+    {
+      label: "system Chromium (channel 'chromium')",
+      options: {
+        headless: true,
+        channel: 'chromium',
+        args: ['--disable-blink-features=AutomationControlled'],
+      },
+    },
+    {
+      label: "Playwright's bundled Chromium",
+      options: {
+        headless: true,
+        args: ['--disable-blink-features=AutomationControlled'],
+      },
+    },
+  ];
+
+  const failures: string[] = [];
+
+  for (const attempt of attempts) {
+    try {
+      return await chromium.launch(attempt.options);
+    } catch (error) {
+      failures.push(
+        `  ${attempt.label}: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
+      );
+    }
+  }
+
+  throw new Error(
+    [
+      'No usable Chromium browser was found, so the Instagram session cannot be established.',
+      ...failures,
+      '  Fix this by running one of:',
+      "    npx playwright install chromium        (downloads Playwright's own build)",
+      '    apt-get install -y chromium google-chrome-stable',
+      '    set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome',
+    ].join('\n')
+  );
 }
 
 function base32ToBuffer(base32: string): Buffer {
@@ -192,12 +289,7 @@ function isLoggedIn(page: Page): boolean {
 }
 
 async function launchContext(credentials: InstagramCredentials): Promise<BrowserContext> {
-  const executablePath = resolveBrowserExecutable();
-  const browser = await chromium.launch({
-    headless: true,
-    ...(executablePath ? { executablePath } : {}),
-    args: ['--disable-blink-features=AutomationControlled'],
-  });
+  const browser = await launchBrowser();
 
   const context = await browser.newContext({
     userAgent: DESKTOP_USER_AGENT,

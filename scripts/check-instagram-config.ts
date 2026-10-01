@@ -83,7 +83,14 @@ async function main(): Promise<void> {
   if (!browser) {
     problems++;
     console.log('');
-    console.log('No local Chrome/Edge found. Run: npx playwright install chromium');
+    console.log('No local Chrome/Edge found at any standard path.');
+    console.log('  A browser is required to sign in. Fix with one of:');
+    console.log('    npx playwright install chromium');
+    console.log('    sudo apt-get install -y chromium        (Debian/Ubuntu)');
+    console.log('    sudo apt-get install -y google-chrome-stable');
+    console.log('    export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium');
+    console.log('  On a headless server, the sandbox must also allow Chrome to start;');
+    console.log('  containers commonly need --no-sandbox, which is not enabled here.');
   }
 
   const failure = session.getInstagramSessionFailure();
