@@ -16,7 +16,11 @@ import {
   directUrlProcessor,
   extractShortCode,
 } from './DirectUrlProcessor';
-import { fetchWithSession, getInstagramCookieHeader } from './InstagramSession';
+import {
+  canAttemptInstagramSession,
+  fetchWithSession,
+  getInstagramCookieHeader,
+} from './InstagramSession';
 import type { MediaResolutionResult } from '@/types';
 
 export class InstagramProvider extends BaseMediaProvider {
@@ -61,9 +65,12 @@ export class InstagramProvider extends BaseMediaProvider {
    * Only AUTH_REQUIRED benefits from a retry. It is Instagram's explicit
    * statement that the reel exists and the video exists, but is not being served
    * to an anonymous request - exactly the gap a session closes.
+   *
+   * Gates on credentials being available rather than on an existing session,
+   * because the very first retry is what performs the login.
    */
   private shouldRetryWithSession(error: unknown): boolean {
-    if (!getInstagramCookieHeader()) return false;
+    if (!canAttemptInstagramSession()) return false;
 
     const code = (error as { code?: string } | null)?.code;
     return code === 'AUTH_REQUIRED';

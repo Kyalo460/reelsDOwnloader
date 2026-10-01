@@ -5,7 +5,7 @@
 // here - the TOTP helper and the browser-executable probe are the pieces whose
 // correctness is not obvious by reading.
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { existsSync } from 'fs';
 import { basename } from 'path';
 import { generateTOTP, resolveBrowserExecutable } from '@/services/media/InstagramSession';
@@ -70,9 +70,7 @@ describe('InstagramSession', () => {
       expect(generateTOTP(RFC_SECRET, stepStart)).toBe(
         generateTOTP(RFC_SECRET, stepStart + 29_999)
       );
-      expect(generateTOTP(RFC_SECRET, stepEnd)).not.toBe(
-        generateTOTP(RFC_SECRET, stepEnd + 1)
-      );
+      expect(generateTOTP(RFC_SECRET, stepEnd)).not.toBe(generateTOTP(RFC_SECRET, stepEnd + 1));
     });
 
     it('accepts a lowercase secret with padding, as issued by some apps', () => {
@@ -127,6 +125,78 @@ describe('InstagramSession', () => {
       if (after !== null) expect(existsSync(after)).toBe(true);
       // Dropping the bogus override must not lose a real local install.
       if (before !== null) expect(after).toBe(before);
+    });
+  });
+
+  describe('automatic session availability', () => {
+    // The service reads credentials from the environment once at module load and
+    // caches them on globalThis. vi.resetModules() alone does not clear that
+    // cache, so both halves are reset per test to keep this deterministic
+    // regardless of the ambient environment or test ordering.
+
+    beforeEach(() => {
+      delete (globalThis as { igCredentials?: unknown }).igCredentials;
+      vi.stubEnv('INSTAGRAM_USERNAME', 'env-user');
+      vi.stubEnv('INSTAGRAM_PASSWORD', 'env-pass');
+      vi.resetModules();
+    });
+
+    afterEach(() => {
+      delete (globalThis as { igCredentials?: unknown }).igCredentials;
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it('seeds credentials from the environment without any explicit init call', async () => {
+      const service = await import('@/services/media/InstagramSession');
+
+      expect(service.canAttemptInstagramSession()).toBe(true);
+    });
+
+    it('allows an authenticated attempt before any session exists', async () => {
+      const service = await import('@/services/media/InstagramSession');
+
+      // The contract the automatic path rests on: the first retry is what
+      // performs the login, so the gate cannot be the cookie header - that
+      // would make automatic mode permanently unreachable.
+      expect(service.canAttemptInstagramSession()).toBe(true);
+      expect(service.getInstagramCookieHeader()).toBeNull();
+      expect(service.getInstagramSession()).toBeNull();
+      expect(service.isInstagramSessionConfigured()).toBe(false);
+    });
+
+    it('leaves the automatic path off when credentials are absent', async () => {
+      vi.stubEnv('INSTAGRAM_USERNAME', '');
+      vi.stubEnv('INSTAGRAM_PASSWORD', '');
+      vi.resetModules();
+
+      const service = await import('@/services/media/InstagramSession');
+
+      expect(service.canAttemptInstagramSession()).toBe(false);
+    });
+
+    it('requires a password as well as a username', async () => {
+      vi.stubEnv('INSTAGRAM_PASSWORD', '');
+      vi.resetModules();
+
+      const service = await import('@/services/media/InstagramSession');
+
+      expect(service.canAttemptInstagramSession()).toBe(false);
+    });
+
+    it('keeps seeded credentials on globalThis so route module copies agree', async () => {
+      const service = await import('@/services/media/InstagramSession');
+
+      // Deliberate: Next.js can hold more than one module instance for a route,
+      // and every copy must agree that a login is possible. Persisting to
+      // globalThis is what stops a fresh copy from silently disabling the
+      // automatic path.
+      expect((globalThis as { igCredentials?: unknown }).igCredentials).toEqual({
+        username: 'env-user',
+        password: 'env-pass',
+        twoFactorSecret: undefined,
+      });
+      expect(service.canAttemptInstagramSession()).toBe(true);
     });
   });
 });

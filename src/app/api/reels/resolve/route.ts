@@ -1,5 +1,11 @@
 // POST /api/reels/resolve
 
+// A configured Instagram session logs in on demand the first time a reel comes
+// back auth-gated, which means launching a browser and completing a login
+// mid-request. That takes tens of seconds, so the platform default budget is
+// raised to cover the one cold call; every later call is a plain fetch.
+export const maxDuration = 60;
+
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';

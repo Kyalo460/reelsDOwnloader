@@ -52,6 +52,38 @@ const globalForSession = globalThis as unknown as {
 };
 
 /**
+ * Credentials from the environment, if the operator configured them.
+ *
+ * This is what makes the session automatic: a deployment that sets
+ * INSTAGRAM_USERNAME/INSTAGRAM_PASSWORD never has to call
+ * initializeInstagramSession. The first reel that Instagram refuses to serve
+ * anonymously triggers the login on demand, and the session is reused from
+ * then on.
+ *
+ * Login is deliberately lazy rather than done at boot. It launches a real
+ * browser and Instagram may present a device-confirmation challenge, and
+ * paying that cost on every deploy - including for deployments that never
+ * resolve an auth-gated reel - would be the wrong trade.
+ */
+function credentialsFromEnv(): InstagramCredentials | null {
+  const username = process.env.INSTAGRAM_USERNAME;
+  const password = process.env.INSTAGRAM_PASSWORD;
+
+  if (!username || !password) return null;
+
+  return {
+    username,
+    password,
+    twoFactorSecret: process.env.INSTAGRAM_2FA_SECRET || undefined,
+  };
+}
+
+// Seeded at module load so the automatic path works without any explicit
+// initialisation call. initializeInstagramSession still overrides this when a
+// caller supplies credentials explicitly.
+globalForSession.igCredentials ??= credentialsFromEnv();
+
+/**
  * Browser binaries to try when Playwright's own download is unavailable.
  *
  * `npx playwright install chromium` fetches from cdn.playwright.dev, which is
@@ -291,6 +323,19 @@ export function getInstagramSession(): InstagramSession | null {
 
 export function isInstagramSessionConfigured(): boolean {
   return getInstagramSession() !== null;
+}
+
+/**
+ * True when a login *could* be performed - credentials are available either
+ * from an explicit initializeInstagramSession call or from the environment.
+ *
+ * This is deliberately not the same as isInstagramSessionConfigured: before the
+ * first login there are no cookies yet, but the automatic path still wants to
+ * try. Callers deciding whether to attempt an authenticated retry must gate on
+ * this, not on having a cookie header in hand.
+ */
+export function canAttemptInstagramSession(): boolean {
+  return globalForSession.igCredentials !== null;
 }
 
 /** Cookie header value for the current session, or null when signed out. */
